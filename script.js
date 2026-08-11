@@ -2,7 +2,8 @@
 // IP WHITELIST - HANYA IP TERTENTU YANG BOLEH AKSES
 // ============================================================
 const ALLOWED_IPS = [
-    '36.79.207.155',  // IP Anda
+    '36.79.207.155',
+    'IP_BARU_ANDA',  // IP Anda
     // Tambahkan IP lain jika perlu, misal:
     // '192.168.1.100',
     // '123.123.123.123'
@@ -120,7 +121,7 @@ let JAM_PULANG_MULAI = 15;
 // ============================================================
 // GPS - LOKASI ABSEN (DEFAULT: SIDOARJO)
 // ============================================================
-const GPS_RADIUS = 10; // 10 meter
+const GPS_RADIUS = 100; // 10 meter
 const DEFAULT_LAT = -7.272305;
 const DEFAULT_LNG = 112.666827;
 let GPS_LOCATION = { lat: DEFAULT_LAT, lng: DEFAULT_LNG }; // Set default langsung
