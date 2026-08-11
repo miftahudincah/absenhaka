@@ -282,14 +282,15 @@ function showToast(msg, type = 'info') {
         info: 'fa-info-circle',
         warning: 'fa-exclamation-triangle',
         auto: 'fa-magic',
-        update: 'fa-sync-alt'
+        update: 'fa-sync-alt',
+        lembur: 'fa-clock'
     };
     toast.className = `toast ${type}`;
     toast.querySelector('i').className = `fas ${iconMap[type] || iconMap.info}`;
     toastMsg.textContent = msg;
     toast.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toast.classList.remove('show'), 3000);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 4000);
 }
 
 // ============================================================
@@ -428,6 +429,38 @@ function cekJamAbsen() {
     const bisaPulang = waktu >= JAM_PULANG_MULAI;
     
     return { bisaMasuk, bisaPulang, jam, menit, waktu };
+}
+
+// ============================================================
+// CEK LEMBUR - DENGAN JAM PULANG DINAMIS
+// ============================================================
+function cekLembur(jamPulang, menitPulang, jamPulangNormal) {
+    const normalPulang = jamPulangNormal !== undefined ? jamPulangNormal : JAM_PULANG_MULAI;
+    
+    const pulangWaktu = jamPulang + menitPulang / 60;
+    const pulangNormalWaktu = normalPulang + 0;
+    
+    const selisihJam = pulangWaktu - pulangNormalWaktu;
+    
+    if (selisihJam >= 1) {
+        const jamLembur = Math.floor(selisihJam);
+        const menitLembur = Math.round((selisihJam % 1) * 60);
+        return {
+            isLembur: true,
+            selisihJam: selisihJam,
+            jamLembur: jamLembur,
+            menitLembur: menitLembur,
+            label: `Lembur ${jamLembur}j ${menitLembur}m`
+        };
+    }
+    
+    return {
+        isLembur: false,
+        selisihJam: 0,
+        jamLembur: 0,
+        menitLembur: 0,
+        label: 'Pulang Normal'
+    };
 }
 
 // ============================================================
@@ -576,8 +609,10 @@ async function loadHistoryFromFirebase() {
                         timestamp: item.timestamp || 0,
                         type: item.type || 'check_in',
                         jamAbsen: item.jamAbsen || '--:--',
+                        jamPulangNormal: item.jamPulangNormal || null,
                         location: item.location || null,
-                        note: item.note || null
+                        note: item.note || null,
+                        lembur: item.lembur || null
                     });
                 }
             });
@@ -866,29 +901,58 @@ async function autoAbsen(name, id) {
             
             if (isCheckIn && bisaPulang) {
                 const existingPulang = STATE.attendanceHistory.find(h =>
-                    h.name === name && h.date === today && h.status === 'pulang'
+                    h.name === name && h.date === today && (h.status === 'pulang' || h.status === 'lembur')
                 );
                 
                 if (existingPulang) {
-                    console.log(`ℹ️ ${name} - Sudah absen pulang hari ini`);
+                    console.log(`ℹ️ ${name} - Sudah absen pulang/lembur hari ini`);
                     STATE.autoAbsenCooldown[cooldownKey] = Date.now();
                     return;
                 }
                 
+                // 🔥 LOAD JAM PULANG DARI FIREBASE SECARA REALTIME
+                let jamPulangNormal = JAM_PULANG_MULAI;
+                try {
+                    const snapshot = await db.ref('settings/jam_kerja/jam_pulang_mulai').once('value');
+                    const dbJamPulang = snapshot.val();
+                    if (dbJamPulang !== null && dbJamPulang !== undefined) {
+                        jamPulangNormal = dbJamPulang;
+                        JAM_PULANG_MULAI = dbJamPulang;
+                        updateJamDisplay();
+                    }
+                } catch (error) {
+                    console.warn('⚠️ Gagal load jam pulang dari DB, pakai default:', error);
+                }
+                
+                // 🔥 CEK LEMBUR DENGAN JAM PULANG DARI DATABASE
+                const lemburInfo = cekLembur(jam, menit, jamPulangNormal);
+                const statusPulang = lemburInfo.isLembur ? 'lembur' : 'pulang';
+                const statusLabel = lemburInfo.isLembur ? `Lembur (${lemburInfo.label})` : 'Pulang';
+                
+                console.log(`📋 Jam pulang normal: ${jamPulangNormal}:00, Pulang aktual: ${jam}:${menit}, Lembur: ${lemburInfo.isLembur}`);
+                
                 const record = {
                     name: name,
-                    status: 'pulang',
-                    type: 'check_out',
+                    status: statusPulang,
+                    type: lemburInfo.isLembur ? 'check_out_lembur' : 'check_out',
                     timestamp: firebase.database.ServerValue.TIMESTAMP,
                     date: today,
                     time: timeStr,
                     jamAbsen: `${String(jam).padStart(2, '0')}:${String(menit).padStart(2, '0')}`,
+                    jamPulangNormal: jamPulangNormal,
                     clientTime: new Date().toISOString(),
                     location: {
                         lat: lokasi.lat,
                         lng: lokasi.lng,
                         distance: lokasi.distance
-                    }
+                    },
+                    lembur: lemburInfo.isLembur ? {
+                        selisihJam: lemburInfo.selisihJam,
+                        jamLembur: lemburInfo.jamLembur,
+                        menitLembur: lemburInfo.menitLembur,
+                        label: lemburInfo.label,
+                        jamPulangNormal: jamPulangNormal
+                    } : null
                 };
 
                 await db.ref('attendance/' + today + '/individuals/' + existingHistory.id).remove();
@@ -901,13 +965,21 @@ async function autoAbsen(name, id) {
                     STATE.attendanceHistory[index] = {
                         id: ref.key,
                         name: name,
-                        status: 'pulang',
+                        status: statusPulang,
                         time: timeStr,
                         date: today,
                         timestamp: Date.now(),
-                        type: 'check_out',
+                        type: lemburInfo.isLembur ? 'check_out_lembur' : 'check_out',
                         jamAbsen: record.jamAbsen,
-                        location: record.location
+                        jamPulangNormal: jamPulangNormal,
+                        location: record.location,
+                        lembur: lemburInfo.isLembur ? {
+                            selisihJam: lemburInfo.selisihJam,
+                            jamLembur: lemburInfo.jamLembur,
+                            menitLembur: lemburInfo.menitLembur,
+                            label: lemburInfo.label,
+                            jamPulangNormal: jamPulangNormal
+                        } : null
                     };
                 }
 
@@ -918,13 +990,15 @@ async function autoAbsen(name, id) {
                 renderHistory();
                 updateStatusBar();
 
-                showToast(`✅ ${name} - Absen Pulang ${timeStr} (${lokasi.distance.toFixed(1)}m)`, 'update');
-                console.log(`✅ Absen Pulang: ${name} pada ${timeStr}`);
+                const lemburMsg = lemburInfo.isLembur ? ` 🕐 Lembur ${lemburInfo.label} (normal ${jamPulangNormal}:00)` : '';
+                const toastType = lemburInfo.isLembur ? 'lembur' : 'update';
+                showToast(`✅ ${name} - ${statusLabel} ${timeStr} (${lokasi.distance.toFixed(1)}m)${lemburMsg}`, toastType);
+                console.log(`✅ ${statusLabel}: ${name} pada ${timeStr}${lemburMsg}`);
                 return;
             }
             
-            if (existingHistory.status === 'pulang') {
-                console.log(`ℹ️ ${name} - Sudah pulang hari ini`);
+            if (existingHistory.status === 'pulang' || existingHistory.status === 'lembur') {
+                console.log(`ℹ️ ${name} - Sudah pulang/lembur hari ini`);
                 STATE.autoAbsenCooldown[cooldownKey] = Date.now();
                 return;
             }
@@ -984,20 +1058,49 @@ async function autoAbsen(name, id) {
             return;
         }
         else if (bisaPulang) {
+            // 🔥 LOAD JAM PULANG DARI FIREBASE SECARA REALTIME
+            let jamPulangNormal = JAM_PULANG_MULAI;
+            try {
+                const snapshot = await db.ref('settings/jam_kerja/jam_pulang_mulai').once('value');
+                const dbJamPulang = snapshot.val();
+                if (dbJamPulang !== null && dbJamPulang !== undefined) {
+                    jamPulangNormal = dbJamPulang;
+                    JAM_PULANG_MULAI = dbJamPulang;
+                    updateJamDisplay();
+                }
+            } catch (error) {
+                console.warn('⚠️ Gagal load jam pulang dari DB, pakai default:', error);
+            }
+            
+            // 🔥 CEK LEMBUR
+            const lemburInfo = cekLembur(jam, menit, jamPulangNormal);
+            const statusPulang = lemburInfo.isLembur ? 'lembur' : 'pulang';
+            const statusLabel = lemburInfo.isLembur ? `Lembur (${lemburInfo.label})` : 'Pulang';
+            
+            console.log(`📋 Jam pulang normal: ${jamPulangNormal}:00, Pulang aktual: ${jam}:${menit}, Lembur: ${lemburInfo.isLembur}`);
+            
             const record = {
                 name: name,
-                status: 'pulang',
-                type: 'check_out',
+                status: statusPulang,
+                type: lemburInfo.isLembur ? 'check_out_lembur' : 'check_out',
                 timestamp: firebase.database.ServerValue.TIMESTAMP,
                 date: today,
                 time: timeStr,
                 jamAbsen: `${String(jam).padStart(2, '0')}:${String(menit).padStart(2, '0')}`,
+                jamPulangNormal: jamPulangNormal,
                 clientTime: new Date().toISOString(),
                 location: {
                     lat: lokasi.lat,
                     lng: lokasi.lng,
                     distance: lokasi.distance
-                }
+                },
+                lembur: lemburInfo.isLembur ? {
+                    selisihJam: lemburInfo.selisihJam,
+                    jamLembur: lemburInfo.jamLembur,
+                    menitLembur: lemburInfo.menitLembur,
+                    label: lemburInfo.label,
+                    jamPulangNormal: jamPulangNormal
+                } : null
             };
 
             const ref = db.ref('attendance/' + today + '/individuals').push();
@@ -1006,13 +1109,21 @@ async function autoAbsen(name, id) {
             STATE.attendanceHistory.unshift({
                 id: ref.key,
                 name: name,
-                status: 'pulang',
+                status: statusPulang,
                 time: timeStr,
                 date: today,
                 timestamp: Date.now(),
-                type: 'check_out',
+                type: lemburInfo.isLembur ? 'check_out_lembur' : 'check_out',
                 jamAbsen: record.jamAbsen,
-                location: record.location
+                jamPulangNormal: jamPulangNormal,
+                location: record.location,
+                lembur: lemburInfo.isLembur ? {
+                    selisihJam: lemburInfo.selisihJam,
+                    jamLembur: lemburInfo.jamLembur,
+                    menitLembur: lemburInfo.menitLembur,
+                    label: lemburInfo.label,
+                    jamPulangNormal: jamPulangNormal
+                } : null
             });
 
             STATE.attendance[id] = true;
@@ -1023,8 +1134,10 @@ async function autoAbsen(name, id) {
             updateAbsenCount();
             updateStatusBar();
 
-            showToast(`✅ ${name} - Absen Pulang ${timeStr} (${lokasi.distance.toFixed(1)}m)`, 'auto');
-            console.log(`✅ Absen Pulang: ${name} pada ${timeStr}`);
+            const lemburMsg = lemburInfo.isLembur ? ` 🕐 Lembur ${lemburInfo.label} (normal ${jamPulangNormal}:00)` : '';
+            const toastType = lemburInfo.isLembur ? 'lembur' : 'auto';
+            showToast(`✅ ${name} - ${statusLabel} ${timeStr} (${lokasi.distance.toFixed(1)}m)${lemburMsg}`, toastType);
+            console.log(`✅ ${statusLabel}: ${name} pada ${timeStr}${lemburMsg}`);
             return;
         }
 
@@ -1040,7 +1153,6 @@ async function autoAbsen(name, id) {
 function renderList() {
     const list = STATE.registered;
     
-    // 🔥 TAMPILKAN SEMUA WAJAH (TERMASUK DUPLICATE)
     totalCount.textContent = list.length;
 
     if (list.length === 0) {
@@ -1056,10 +1168,20 @@ function renderList() {
         const hasUpdate = STATE.attendanceHistory.some(h => h.name === item.name && h.type === 'update_time');
         const hasIzin = STATE.attendanceHistory.some(h => h.name === item.name && h.type === 'izin_pulang');
         
+        // 🔥 CEK APAKAH ADA RIWAYAT LEMBUR HARI INI
+        const today = new Date().toISOString().split('T')[0];
+        const hasLembur = STATE.attendanceHistory.some(h => 
+            h.name === item.name && 
+            h.date === today && 
+            (h.status === 'lembur' || h.type === 'check_out_lembur')
+        );
+        
         let extraBadge = '';
         if (hadir && hasUpdate) extraBadge = 'updated';
         else if (hadir && hasIzin) extraBadge = 'izin';
         else if (hadir) extraBadge = 'auto';
+        
+        const lemburBadge = hasLembur ? ` <span class="badge-lembur">⚡ lembur</span>` : '';
         
         html += `
                     <div class="face-item" data-id="${item.id}">
@@ -1068,6 +1190,7 @@ function renderList() {
                             <span>${item.name}</span>
                             ${hadir ? `<span style="font-size:0.6rem;color:#b06af0;margin-left:0.3rem;"><i class="fas fa-magic"></i> ${extraBadge}</span>` : ''}
                             ${hasIzin ? `<span style="font-size:0.6rem;color:#f39c12;margin-left:0.2rem;">📝</span>` : ''}
+                            ${lemburBadge}
                         </div>
                         <span class="status-badge ${statusClass}">${statusLabel} ${hasUpdate ? '🔄' : ''}</span>
                         <button class="btn-hapus" data-id="${item.id}" title="Hapus Wajah">
@@ -1106,7 +1229,6 @@ function renderHistory() {
         return;
     }
 
-    // 🔥 TAMPILKAN SEMUA RIWAYAT (TIDAK HANYA 1 PER NAMA)
     const sortedHistory = [...todayHistory].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
     sortedHistory.slice(0, 50).forEach(item => {
@@ -1114,8 +1236,13 @@ function renderHistory() {
         let statusLabel = '🚪 Pulang';
         let badge = ' <span class="h-update">pulang</span>';
         
-        // 🔥 CEK STATUS IZIN PULANG
-        if (item.status === 'izin_pulang' || item.type === 'izin_pulang') {
+        // 🔥 CEK STATUS LEMBUR
+        if (item.status === 'lembur' || item.type === 'check_out_lembur') {
+            statusClass = 'lembur';
+            const lemburLabel = item.lembur?.label || 'Lembur';
+            statusLabel = `🕐 ${lemburLabel}`;
+            badge = ` <span class="h-lembur">⚡ lembur</span>`;
+        } else if (item.status === 'izin_pulang' || item.type === 'izin_pulang') {
             statusClass = 'izin-pulang';
             statusLabel = '📝 Izin Pulang';
             badge = ' <span class="h-izin">izin</span>';
@@ -1137,11 +1264,15 @@ function renderHistory() {
         const jarak = item.location && item.location.distance ? `📍${item.location.distance.toFixed(0)}m` : '';
         const note = item.note ? ` 📝${item.note}` : '';
         
+        // 🔥 TAMBAHKAN INFO JAM PULANG NORMAL
+        const normalPulangInfo = item.jamPulangNormal !== undefined ? ` (normal ${item.jamPulangNormal}:00)` : '';
+        const lemburInfo = item.lembur ? ` 🕐${item.lembur.label}${normalPulangInfo}` : '';
+        
         html += `
                     <div class="history-item" data-id="${item.id}">
                         <span class="h-name"><i class="fas fa-user"></i> ${item.name}</span>
                         <span class="h-status ${statusClass}">${statusLabel}${badge}</span>
-                        <span class="h-time"><i class="fas fa-clock"></i> ${jamTampil} ${jarak}${note}</span>
+                        <span class="h-time"><i class="fas fa-clock"></i> ${jamTampil} ${jarak}${lemburInfo}${note}</span>
                         <button class="btn-hapus-history" data-id="${item.id}" data-name="${item.name}" title="Hapus riwayat ini">
                             <i class="fas fa-trash-alt" style="font-size:0.6rem;color:#6a7e94;"></i>
                         </button>
@@ -1402,6 +1533,44 @@ async function saveJamSettings() {
     
     showToast(`✅ Jam kerja diperbarui: Masuk ≤ ${JAM_MASUK_BATAS}:00 | Pulang ≥ ${JAM_PULANG_MULAI}:00`, 'success');
     console.log('✅ Pengaturan jam kerja berhasil diubah dan disimpan ke Firebase');
+}
+
+// ============================================================
+// LISTENER REALTIME - PERUBAHAN JAM KERJA
+// ============================================================
+function listenJamKerjaChanges() {
+    const jamKerjaRef = db.ref('settings/jam_kerja');
+    
+    jamKerjaRef.on('value', (snapshot) => {
+        const data = snapshot.val();
+        if (!data) return;
+        
+        let changed = false;
+        let newJamPulang = JAM_PULANG_MULAI;
+        
+        if (data.jam_masuk_batas !== undefined && data.jam_masuk_batas !== JAM_MASUK_BATAS) {
+            JAM_MASUK_BATAS = data.jam_masuk_batas;
+            changed = true;
+            console.log(`🔄 Jam masuk diupdate dari Firebase: ${JAM_MASUK_BATAS}:00`);
+        }
+        
+        if (data.jam_pulang_mulai !== undefined && data.jam_pulang_mulai !== JAM_PULANG_MULAI) {
+            newJamPulang = data.jam_pulang_mulai;
+            JAM_PULANG_MULAI = newJamPulang;
+            changed = true;
+            console.log(`🔄 Jam pulang diupdate dari Firebase: ${JAM_PULANG_MULAI}:00`);
+            showToast(`🔄 Jam pulang diubah menjadi ${JAM_PULANG_MULAI}:00`, 'info');
+        }
+        
+        if (changed) {
+            updateJamDisplay();
+            updateStatusBar();
+        }
+    }, (error) => {
+        console.error('❌ Error listening jam kerja:', error);
+    });
+    
+    console.log('👂 Listener jam kerja aktif');
 }
 
 // ============================================================
@@ -1735,7 +1904,8 @@ async function submitIzinPulang() {
                 lng: lokasi.lng,
                 distance: lokasi.distance
             },
-            note: 'Izin pulang lebih awal'
+            note: 'Izin pulang lebih awal',
+            lembur: null
         };
 
         if (existingHistory) {
@@ -1756,7 +1926,8 @@ async function submitIzinPulang() {
                     type: 'izin_pulang',
                     jamAbsen: record.jamAbsen,
                     location: record.location,
-                    note: 'Izin pulang lebih awal'
+                    note: 'Izin pulang lebih awal',
+                    lembur: null
                 };
             }
         } else {
@@ -1773,7 +1944,8 @@ async function submitIzinPulang() {
                 type: 'izin_pulang',
                 jamAbsen: record.jamAbsen,
                 location: record.location,
-                note: 'Izin pulang lebih awal'
+                note: 'Izin pulang lebih awal',
+                lembur: null
             });
 
             STATE.attendance[face.id] = true;
@@ -1908,6 +2080,9 @@ async function exportExcel() {
                             let statusLabel = item.status === 'hadir' ? 'Masuk' : 'Pulang';
                             if (item.status === 'izin_pulang' || item.type === 'izin_pulang') {
                                 statusLabel = 'Izin Pulang';
+                            } else if (item.status === 'lembur' || item.type === 'check_out_lembur') {
+                                const lemburLabel = item.lembur?.label || 'Lembur';
+                                statusLabel = `Lembur (${lemburLabel})`;
                             }
                             allHistory.push({
                                 tanggal: dateKey,
@@ -1917,7 +2092,9 @@ async function exportExcel() {
                                 type: item.type || 'check_in',
                                 jarak: item.location && item.location.distance ? 
                                     item.location.distance.toFixed(1) + 'm' : '-',
-                                note: item.note || ''
+                                note: item.note || '',
+                                lembur: item.lembur || null,
+                                jamPulangNormal: item.jamPulangNormal || null
                             });
                         }
                     });
@@ -1955,14 +2132,21 @@ async function exportExcel() {
                 month: '2-digit',
                 year: 'numeric'
             });
+            
+            let statusDisplay = item.status;
+            if (item.lembur) {
+                const normalInfo = item.jamPulangNormal ? ` (normal ${item.jamPulangNormal}:00)` : '';
+                statusDisplay = `${item.status}${normalInfo}`;
+            }
+            
             excelData.push([
                 index + 1,
                 dateFormatted,
                 item.nama,
-                item.status,
+                statusDisplay,
                 item.waktu,
                 item.jarak,
-                item.note
+                item.note || ''
             ]);
         });
 
@@ -1972,9 +2156,12 @@ async function exportExcel() {
         const masukCount = allHistory.filter(h => h.status === 'Masuk').length;
         const pulangCount = allHistory.filter(h => h.status === 'Pulang').length;
         const izinCount = allHistory.filter(h => h.status === 'Izin Pulang').length;
+        const lemburCount = allHistory.filter(h => h.status.includes('Lembur')).length;
+        
         excelData.push(['Total Masuk:', masukCount]);
         excelData.push(['Total Pulang:', pulangCount]);
         excelData.push(['Total Izin Pulang:', izinCount]);
+        excelData.push(['Total Lembur:', lemburCount]);
 
         const ws = XLSX.utils.aoa_to_sheet(excelData);
         
@@ -1982,7 +2169,7 @@ async function exportExcel() {
             { wch: 5 },
             { wch: 15 },
             { wch: 20 },
-            { wch: 14 },
+            { wch: 25 },
             { wch: 12 },
             { wch: 15 },
             { wch: 20 }
@@ -2002,10 +2189,10 @@ async function exportExcel() {
         XLSX.writeFile(wb, fileName);
         
         if (exportStatus) {
-            exportStatus.textContent = `✅ Berhasil export ${allHistory.length} data!`;
+            exportStatus.textContent = `✅ Berhasil export ${allHistory.length} data! (${lemburCount} lembur)`;
             exportStatus.style.color = '#2ecc71';
         }
-        showToast(`✅ Berhasil export ${allHistory.length} data ke Excel!`, 'success');
+        showToast(`✅ Berhasil export ${allHistory.length} data ke Excel! (${lemburCount} lembur)`, 'success');
         
         setTimeout(() => {
             closeExportModal();
@@ -2803,6 +2990,9 @@ async function initApp() {
 
         console.log('⏳ Memulai loadSettingsFromFirebase...');
         await loadSettingsFromFirebase();
+
+        // 🔥 START LISTENER REALTIME UNTUK JAM KERJA
+        listenJamKerjaChanges();
 
         await loadFacesFromFirebase();
         await loadHistoryFromFirebase();
