@@ -16,18 +16,21 @@
         <!-- HEADER -->
         <div class="header">
             <h1><i class="fas fa-user-check"></i> Face Attendance</h1>
-            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
-                <span class="badge-firebase"><i class="fas fa-fire"></i> Firebase</span>
-                <span class="badge-rtdb"><i class="fas fa-database"></i> Realtime DB</span>
-                <span class="badge-auto"><i class="fas fa-magic"></i> Auto Absen</span>
-                <span class="badge-update"><i class="fas fa-sync-alt"></i> Update Time</span>
-                <span class="badge-gps" id="gpsBadge" style="background:#1a2a2a;border-color:#f39c12;color:#f39c12;padding:0.3rem 1rem;border-radius:40px;font-size:0.8rem;border:1px solid;cursor:pointer;" title="Klik untuk atur lokasi">
+            <div class="header-badges">
+                <span class="badge badge-firebase"><i class="fas fa-fire"></i> Firebase</span>
+                <span class="badge badge-rtdb"><i class="fas fa-database"></i> Realtime DB</span>
+                <span class="badge badge-auto"><i class="fas fa-magic"></i> Auto Absen</span>
+                <span class="badge badge-update"><i class="fas fa-sync-alt"></i> Update Time</span>
+                <span class="badge badge-gps" id="gpsBadge" title="Klik untuk atur lokasi">
                     <i class="fas fa-map-marker-alt"></i> <span id="gpsStatus">Lokasi: Belum</span>
                 </span>
-                <span class="badge-jam" id="jamInfoBadge" style="background:#1a2a2a;border-color:#2ecc71;color:#2ecc71;padding:0.3rem 1rem;border-radius:40px;font-size:0.8rem;border:1px solid;cursor:pointer;" title="Klik untuk ubah jam kerja">
+                <span class="badge badge-jam" id="jamInfoBadge" title="Klik untuk ubah jam kerja">
                     <i class="fas fa-clock"></i> Masuk ≤ <span id="jamMasukDisplay">10</span>:00 | Pulang ≥ <span id="jamPulangDisplay">15</span>:00
                 </span>
-                <span class="badge"><i class="fas fa-moon"></i> dark</span>
+                <span class="badge badge-moon"><i class="fas fa-moon"></i> dark</span>
+                <button class="btn btn-sm btn-sync-all" id="syncAllBtn" style="background:linear-gradient(135deg,#4a9eff,#2ecc71);color:#fff;border:none;padding:4px 12px;border-radius:40px;font-size:0.65rem;cursor:pointer;display:flex;align-items:center;gap:4px;">
+                    <i class="fas fa-sync-alt"></i> Sinkron Semua
+                </button>
             </div>
         </div>
 
@@ -36,11 +39,9 @@
             <div class="time" id="clockTime">--:--:--</div>
             <div class="date" id="clockDate">--/--/----</div>
             <div class="day" id="clockDay">--</div>
-            <div style="margin-left: auto; font-size: 0.8rem; color: #6a7e94;">
-                <i class="fas fa-fingerprint"></i> <span id="absenCount">0</span> hari ini
-            </div>
-            <div style="font-size: 0.8rem; color: #6a7e94;">
-                <i class="fas fa-sync-alt"></i> <span id="updateCount">0</span> update
+            <div class="stats">
+                <span><i class="fas fa-fingerprint"></i> <span id="absenCount">0</span> hari ini</span>
+                <span><i class="fas fa-sync-alt"></i> <span id="updateCount">0</span> update</span>
             </div>
         </div>
 
@@ -95,7 +96,7 @@
                     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.3rem;">
                         <h4 style="margin:0;"><i class="fas fa-clock"></i> Riwayat Absensi Hari Ini</h4>
                         <div style="display:flex;gap:0.3rem;flex-wrap:wrap;">
-                            <button class="btn btn-sm btn-export" id="exportExcelBtn" style="font-size:0.65rem;padding:0.2rem 0.6rem;">
+                            <button class="btn btn-sm btn-export" id="exportExcelBtn">
                                 <i class="fas fa-file-excel"></i> Export Excel
                             </button>
                         </div>
@@ -121,6 +122,9 @@
                 <button class="btn" id="stopBtn" disabled><i class="fas fa-stop"></i> Hentikan</button>
                 <button class="btn btn-warning" id="syncBtn"><i class="fas fa-cloud-upload-alt"></i> Sinkron</button>
                 <button class="btn btn-danger" id="resetBtn"><i class="fas fa-trash-alt"></i> Reset</button>
+                <button class="btn btn-izin-pulang" id="izinPulangBtn">
+                    <i class="fas fa-door-open"></i> Izin Pulang
+                </button>
             </div>
             <div class="status" id="statusDisplay">
                 <span class="dot inactive" id="statusDot"></span>
@@ -259,7 +263,7 @@
             </div>
             <div class="modal-body">
                 <div class="register-info" style="margin-bottom:0.5rem;">
-                    <p><i class="fas fa-info-circle"></i> Tentukan titik lokasi absen. Radius absen adalah <strong>10 meter</strong> dari titik ini.</p>
+                    <p><i class="fas fa-info-circle"></i> Tentukan titik lokasi absen. Radius absen adalah <strong>100 meter</strong> dari titik ini.</p>
                     <p style="margin-top:0.3rem;font-size:0.8rem;color:#f39c12;"><i class="fas fa-exclamation-triangle"></i> Masukkan kode akses untuk mengubah lokasi.</p>
                 </div>
 
@@ -334,6 +338,48 @@
                     </button>
                     <button class="btn btn-success" id="doExportBtn">
                         <i class="fas fa-download"></i> Export Excel
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+    MODAL IZIN PULANG - UNTUK KONFIRMASI
+    ============================================================ -->
+    <div class="modal-overlay" id="izinPulangModal">
+        <div class="modal-content" style="max-width:450px;">
+            <div class="modal-header">
+                <h2><i class="fas fa-door-open"></i> Izin Pulang</h2>
+                <button class="modal-close" id="closeIzinPulangModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="register-info" style="margin-bottom:0.5rem;">
+                    <p><i class="fas fa-info-circle"></i> Konfirmasi izin pulang lebih awal untuk karyawan.</p>
+                    <p style="margin-top:0.3rem;font-size:0.8rem;color:#f39c12;"><i class="fas fa-exclamation-triangle"></i> Pastikan wajah terdeteksi di kamera.</p>
+                </div>
+
+                <div class="register-form" style="grid-template-columns:1fr;">
+                    <div class="form-group">
+                        <label><i class="fas fa-key"></i> Kode Akses</label>
+                        <input type="password" id="izinAccessCode" placeholder="Masukkan kode akses..." />
+                    </div>
+                    <div class="form-group">
+                        <label><i class="fas fa-user"></i> Nama Karyawan</label>
+                        <input type="text" id="izinNamaInput" placeholder="Masukkan nama..." />
+                    </div>
+                    <div class="form-group" style="grid-column:1/-1;">
+                        <label><i class="fas fa-info-circle"></i> Status</label>
+                        <div class="register-status" id="izinStatus">Masukkan nama dan kode akses</div>
+                    </div>
+                </div>
+
+                <div class="register-actions">
+                    <button class="btn btn-danger" id="cancelIzinBtn">
+                        <i class="fas fa-times"></i> Batal
+                    </button>
+                    <button class="btn btn-warning" id="submitIzinBtn" style="background:linear-gradient(135deg,#f39c12,#e67e22);color:#fff;border-color:#f39c12;">
+                        <i class="fas fa-check"></i> Konfirmasi Izin Pulang
                     </button>
                 </div>
             </div>

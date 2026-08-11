@@ -170,12 +170,12 @@ const STATE = {
     isJamModalOpen: false,
     isExportModalOpen: false,
     isGpsModalOpen: false,
+    isIzinPulangModalOpen: false,
     modelLoadingPromise: null,
     today: new Date().toISOString().split('T')[0],
     mapInstance: null,
     mapMarker: null,
     mapCircle: null,
-    // 🔥 Tambahan untuk mencegah duplicate
     processedFaces: new Set()
 };
 
@@ -237,10 +237,21 @@ const exportWeek = document.getElementById('exportWeek');
 const exportYear = document.getElementById('exportYear');
 const exportStatus = document.getElementById('exportStatus');
 
+// Izin Pulang Modal DOM
+const izinPulangModal = document.getElementById('izinPulangModal');
+const closeIzinPulangModal = document.getElementById('closeIzinPulangModal');
+const cancelIzinBtn = document.getElementById('cancelIzinBtn');
+const submitIzinBtn = document.getElementById('submitIzinBtn');
+const izinAccessCode = document.getElementById('izinAccessCode');
+const izinNamaInput = document.getElementById('izinNamaInput');
+const izinStatus = document.getElementById('izinStatus');
+
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const resetBtn = document.getElementById('resetBtn');
 const syncBtn = document.getElementById('syncBtn');
+const syncAllBtn = document.getElementById('syncAllBtn');
+const izinPulangBtn = document.getElementById('izinPulangBtn');
 const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 const detectionInfo = document.getElementById('detectionInfo');
@@ -565,7 +576,8 @@ async function loadHistoryFromFirebase() {
                         timestamp: item.timestamp || 0,
                         type: item.type || 'check_in',
                         jamAbsen: item.jamAbsen || '--:--',
-                        location: item.location || null
+                        location: item.location || null,
+                        note: item.note || null
                     });
                 }
             });
@@ -758,12 +770,69 @@ async function syncFacesToFirebase() {
 }
 
 // ============================================================
-// AUTO ATTENDANCE FUNCTIONS - DIPERBAIKI UNTUK MENCEGAH DUPLICATE
+// FUNGSI SINKRON SEMUA DATA
+// ============================================================
+async function syncAllData() {
+    try {
+        console.log('🔄 Memulai sinkronisasi semua data...');
+        
+        if (STATE.registered.length > 0) {
+            const updates = {};
+            for (const face of STATE.registered) {
+                updates[face.id] = {
+                    id: face.id,
+                    name: face.name,
+                    descriptor: face.descriptor,
+                    updatedAt: firebase.database.ServerValue.TIMESTAMP
+                };
+            }
+            await db.ref('faces').update(updates);
+            console.log('✅ Wajah tersinkron');
+        }
+        
+        await db.ref('settings/jam_kerja').set({
+            jam_masuk_batas: JAM_MASUK_BATAS,
+            jam_pulang_mulai: JAM_PULANG_MULAI,
+            updatedAt: firebase.database.ServerValue.TIMESTAMP
+        });
+        console.log('✅ Jam kerja tersinkron');
+        
+        if (GPS_LOCATION) {
+            await db.ref('settings/gps').set({
+                lat: GPS_LOCATION.lat,
+                lng: GPS_LOCATION.lng,
+                radius: GPS_RADIUS,
+                updatedAt: firebase.database.ServerValue.TIMESTAMP
+            });
+            console.log('✅ GPS tersinkron');
+        }
+        
+        STATE.lastSync = Date.now();
+        updateLastSync();
+        
+        await loadFacesFromFirebase();
+        await loadHistoryFromFirebase();
+        await loadSettingsFromFirebase();
+        
+        updateStatusBar();
+        renderList();
+        renderHistory();
+        
+        showToast('✅ Semua data berhasil disinkronkan ke Firebase!', 'success');
+        console.log('✅ Sinkronisasi semua data selesai');
+        
+    } catch (error) {
+        console.error('❌ Gagal sinkronisasi:', error);
+        showToast('❌ Gagal sinkronisasi: ' + error.message, 'error');
+    }
+}
+
+// ============================================================
+// AUTO ATTENDANCE FUNCTIONS
 // ============================================================
 async function autoAbsen(name, id) {
     const now = Date.now();
     
-    // 🔥 COOLDOWN PER NAMA (10 detik) - mencegah duplicate
     const cooldownKey = name;
     if (STATE.autoAbsenCooldown[cooldownKey] && (now - STATE.autoAbsenCooldown[cooldownKey] < 10000)) {
         console.log(`⏳ ${name} - Cooldown aktif, lewati`);
@@ -774,7 +843,6 @@ async function autoAbsen(name, id) {
     const timeStr = new Date().toLocaleTimeString('id-ID', { hour12: false });
     const { bisaMasuk, bisaPulang, jam, menit } = cekJamAbsen();
     
-    // 🔥 CEK SUDAH ADA ABSENSI HARI INI UNTUK NAMA INI
     const existingHistory = STATE.attendanceHistory.find(h =>
         h.name === name && h.date === today
     );
@@ -787,20 +855,16 @@ async function autoAbsen(name, id) {
             return;
         }
 
-        // 🔥 JIKA SUDAH ADA ABSENSI, JANGAN TAMBAH LAGI
         if (existingHistory) {
             const isCheckIn = existingHistory.type === 'check_in' || existingHistory.type === 'auto_check_in';
             
-            // Jika sudah check_in dan belum waktunya pulang
             if (isCheckIn && !bisaPulang) {
                 console.log(`ℹ️ ${name} - Sudah absen masuk, tunggu jam pulang`);
                 STATE.autoAbsenCooldown[cooldownKey] = Date.now();
                 return;
             }
             
-            // Jika sudah check_in dan sudah waktunya pulang -> update ke pulang
             if (isCheckIn && bisaPulang) {
-                // Cek apakah sudah ada status pulang hari ini
                 const existingPulang = STATE.attendanceHistory.find(h =>
                     h.name === name && h.date === today && h.status === 'pulang'
                 );
@@ -811,7 +875,6 @@ async function autoAbsen(name, id) {
                     return;
                 }
                 
-                // Update check_in menjadi pulang
                 const record = {
                     name: name,
                     status: 'pulang',
@@ -828,14 +891,11 @@ async function autoAbsen(name, id) {
                     }
                 };
 
-                // Hapus yang lama
                 await db.ref('attendance/' + today + '/individuals/' + existingHistory.id).remove();
 
-                // Simpan yang baru
                 const ref = db.ref('attendance/' + today + '/individuals').push();
                 await ref.set(record);
 
-                // Update state
                 const index = STATE.attendanceHistory.findIndex(h => h.id === existingHistory.id);
                 if (index !== -1) {
                     STATE.attendanceHistory[index] = {
@@ -863,7 +923,6 @@ async function autoAbsen(name, id) {
                 return;
             }
             
-            // Jika sudah pulang, jangan tambah lagi
             if (existingHistory.status === 'pulang') {
                 console.log(`ℹ️ ${name} - Sudah pulang hari ini`);
                 STATE.autoAbsenCooldown[cooldownKey] = Date.now();
@@ -874,7 +933,6 @@ async function autoAbsen(name, id) {
             return;
         }
 
-        // 🔥 BELUM ADA ABSENSI - BUAT BARU
         if (bisaMasuk) {
             const record = {
                 name: name,
@@ -980,15 +1038,24 @@ async function autoAbsen(name, id) {
 // ============================================================
 function renderList() {
     const list = STATE.registered;
-    totalCount.textContent = list.length;
+    
+    const uniqueMap = new Map();
+    list.forEach(item => {
+        if (!uniqueMap.has(item.name)) {
+            uniqueMap.set(item.name, item);
+        }
+    });
+    const uniqueList = Array.from(uniqueMap.values());
+    
+    totalCount.textContent = uniqueList.length;
 
-    if (list.length === 0) {
+    if (uniqueList.length === 0) {
         faceListEl.innerHTML = `<div class="empty-list">Belum ada wajah terdaftar di Firebase</div>`;
         return;
     }
 
     let html = '';
-    list.forEach((item) => {
+    uniqueList.forEach((item) => {
         const hadir = STATE.attendance[item.id] === true;
         const statusClass = hadir ? 'hadir' : 'tidak-hadir';
         const statusLabel = hadir ? '✔ Hadir' : '✘ Tidak';
@@ -1017,6 +1084,9 @@ function renderList() {
     });
 }
 
+// ============================================================
+// RENDER HISTORY - DENGAN STATUS IZIN PULANG
+// ============================================================
 function renderHistory() {
     const history = STATE.attendanceHistory;
 
@@ -1034,7 +1104,6 @@ function renderHistory() {
         return;
     }
 
-    // 🔥 UNIQUE: Hanya tampilkan 1 entry per nama per hari
     const uniqueHistory = [];
     const seenNames = new Set();
     
@@ -1046,24 +1115,38 @@ function renderHistory() {
     }
 
     uniqueHistory.slice(0, 20).forEach(item => {
-        const statusClass = item.status === 'hadir' ? 'hadir' : 'pulang';
-        const statusLabel = item.status === 'hadir' ? '✔ Masuk' : '🚪 Pulang';
-        const isCheckIn = item.type === 'check_in' || item.type === 'auto_check_in';
-        const isCheckOut = item.type === 'check_out';
-        const isUpdate = item.type === 'update_time';
-        let badge = '';
-        if (isCheckIn) badge = ' <span class="h-auto">masuk</span>';
-        if (isCheckOut) badge = ' <span class="h-update">pulang</span>';
-        if (isUpdate) badge = ' <span class="h-update">update</span>';
+        let statusClass = 'pulang';
+        let statusLabel = '🚪 Pulang';
+        let badge = ' <span class="h-update">pulang</span>';
+        
+        // 🔥 CEK STATUS IZIN PULANG
+        if (item.status === 'izin_pulang' || item.type === 'izin_pulang') {
+            statusClass = 'izin-pulang';
+            statusLabel = '📝 Izin Pulang';
+            badge = ' <span class="h-izin">izin</span>';
+        } else if (item.status === 'hadir' || item.type === 'check_in' || item.type === 'auto_check_in') {
+            statusClass = 'hadir';
+            statusLabel = '✔ Masuk';
+            badge = ' <span class="h-auto">masuk</span>';
+        } else if (item.status === 'pulang' || item.type === 'check_out') {
+            statusClass = 'pulang';
+            statusLabel = '🚪 Pulang';
+            badge = ' <span class="h-update">pulang</span>';
+        } else if (item.type === 'update_time') {
+            statusClass = 'pulang';
+            statusLabel = '🚪 Pulang';
+            badge = ' <span class="h-update">update</span>';
+        }
         
         const jamTampil = item.jamAbsen || item.time || '--:--';
         const jarak = item.location && item.location.distance ? `📍${item.location.distance.toFixed(0)}m` : '';
+        const note = item.note ? ` 📝${item.note}` : '';
         
         html += `
                     <div class="history-item" data-id="${item.id}">
                         <span class="h-name"><i class="fas fa-user"></i> ${item.name}</span>
                         <span class="h-status ${statusClass}">${statusLabel}${badge}</span>
-                        <span class="h-time"><i class="fas fa-clock"></i> ${jamTampil} ${jarak}</span>
+                        <span class="h-time"><i class="fas fa-clock"></i> ${jamTampil} ${jarak}${note}</span>
                         <button class="btn-hapus-history" data-id="${item.id}" data-name="${item.name}" title="Hapus riwayat ini">
                             <i class="fas fa-trash-alt" style="font-size:0.6rem;color:#6a7e94;"></i>
                         </button>
@@ -1560,6 +1643,175 @@ if (gpsSearchInput) {
 }
 
 // ============================================================
+// IZIN PULANG - ABSEN PULANG LEBIH AWAL
+// ============================================================
+function openIzinPulangModal() {
+    if (STATE.isIzinPulangModalOpen) return;
+    
+    if (STATE.registered.length === 0) {
+        showToast('⚠️ Belum ada wajah terdaftar!', 'warning');
+        return;
+    }
+
+    if (!STATE.isDetecting) {
+        showToast('⚠️ Nyalakan deteksi terlebih dahulu!', 'warning');
+        return;
+    }
+
+    STATE.isIzinPulangModalOpen = true;
+    izinPulangModal.classList.add('show');
+    izinAccessCode.value = '';
+    izinNamaInput.value = '';
+    izinStatus.textContent = 'Masukkan nama dan kode akses';
+    izinStatus.style.color = '#6a7e94';
+    submitIzinBtn.disabled = false;
+}
+
+function closeIzinPulangModalFn() {
+    STATE.isIzinPulangModalOpen = false;
+    izinPulangModal.classList.remove('show');
+}
+
+async function submitIzinPulang() {
+    const code = izinAccessCode.value.trim();
+    const nama = izinNamaInput.value.trim();
+
+    if (!code) {
+        izinStatus.textContent = '❌ Masukkan kode akses!';
+        izinStatus.style.color = '#e74c3c';
+        return;
+    }
+
+    if (code !== ACCESS_CODE) {
+        izinStatus.textContent = '❌ Kode akses salah!';
+        izinStatus.style.color = '#e74c3c';
+        showToast('❌ Kode akses salah!', 'error');
+        return;
+    }
+
+    if (!nama) {
+        izinStatus.textContent = '❌ Masukkan nama!';
+        izinStatus.style.color = '#e74c3c';
+        return;
+    }
+
+    const face = STATE.registered.find(f => f.name.toLowerCase() === nama.toLowerCase());
+    if (!face) {
+        izinStatus.textContent = `❌ Nama "${nama}" tidak ditemukan!`;
+        izinStatus.style.color = '#e74c3c';
+        showToast(`❌ Nama "${nama}" tidak ditemukan!`, 'error');
+        return;
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    const timeStr = new Date().toLocaleTimeString('id-ID', { hour12: false });
+    const now = new Date();
+    const jam = now.getHours();
+    const menit = now.getMinutes();
+
+    const existingHistory = STATE.attendanceHistory.find(h =>
+        h.name === face.name && h.date === today
+    );
+
+    try {
+        const lokasi = await cekLokasi();
+        if (!lokasi.valid) {
+            izinStatus.textContent = `📍 ${lokasi.error}`;
+            izinStatus.style.color = '#e74c3c';
+            showToast(`📍 ${face.name} - ${lokasi.error}`, 'warning');
+            return;
+        }
+
+        izinStatus.textContent = '⏳ Memproses izin pulang...';
+        izinStatus.style.color = '#f39c12';
+        submitIzinBtn.disabled = true;
+
+        const record = {
+            name: face.name,
+            status: 'izin_pulang',
+            type: 'izin_pulang',
+            timestamp: firebase.database.ServerValue.TIMESTAMP,
+            date: today,
+            time: timeStr,
+            jamAbsen: `${String(jam).padStart(2, '0')}:${String(menit).padStart(2, '0')}`,
+            clientTime: new Date().toISOString(),
+            location: {
+                lat: lokasi.lat,
+                lng: lokasi.lng,
+                distance: lokasi.distance
+            },
+            note: 'Izin pulang lebih awal'
+        };
+
+        if (existingHistory) {
+            await db.ref('attendance/' + today + '/individuals/' + existingHistory.id).remove();
+            
+            const ref = db.ref('attendance/' + today + '/individuals').push();
+            await ref.set(record);
+
+            const index = STATE.attendanceHistory.findIndex(h => h.id === existingHistory.id);
+            if (index !== -1) {
+                STATE.attendanceHistory[index] = {
+                    id: ref.key,
+                    name: face.name,
+                    status: 'izin_pulang',
+                    time: timeStr,
+                    date: today,
+                    timestamp: Date.now(),
+                    type: 'izin_pulang',
+                    jamAbsen: record.jamAbsen,
+                    location: record.location,
+                    note: 'Izin pulang lebih awal'
+                };
+            }
+        } else {
+            const ref = db.ref('attendance/' + today + '/individuals').push();
+            await ref.set(record);
+
+            STATE.attendanceHistory.unshift({
+                id: ref.key,
+                name: face.name,
+                status: 'izin_pulang',
+                time: timeStr,
+                date: today,
+                timestamp: Date.now(),
+                type: 'izin_pulang',
+                jamAbsen: record.jamAbsen,
+                location: record.location,
+                note: 'Izin pulang lebih awal'
+            });
+
+            STATE.attendance[face.id] = true;
+        }
+
+        STATE.updateCount++;
+        STATE.lastUpdateTime = Date.now();
+        STATE.autoAbsenCooldown[face.name] = Date.now();
+
+        renderHistory();
+        updateStatusBar();
+        updateAbsenCount();
+
+        izinStatus.textContent = `✅ ${face.name} - IZIN PULANG ${timeStr}`;
+        izinStatus.style.color = '#2ecc71';
+        showToast(`✅ ${face.name} - IZIN PULANG ${timeStr} (${lokasi.distance.toFixed(1)}m)`, 'success');
+        console.log(`✅ Izin Pulang: ${face.name} pada ${timeStr}, jarak ${lokasi.distance.toFixed(1)}m`);
+
+        setTimeout(() => {
+            closeIzinPulangModalFn();
+            submitIzinBtn.disabled = false;
+        }, 1500);
+
+    } catch (error) {
+        console.error('❌ Gagal izin pulang:', error);
+        izinStatus.textContent = '❌ Gagal: ' + error.message;
+        izinStatus.style.color = '#e74c3c';
+        showToast('❌ Gagal izin pulang: ' + error.message, 'error');
+        submitIzinBtn.disabled = false;
+    }
+}
+
+// ============================================================
 // EXPORT EXCEL MINGGUAN
 // ============================================================
 
@@ -1658,14 +1910,19 @@ async function exportExcel() {
                     Object.keys(dayData.individuals).forEach(id => {
                         const item = dayData.individuals[id];
                         if (item.name && item.status) {
+                            let statusLabel = item.status === 'hadir' ? 'Masuk' : 'Pulang';
+                            if (item.status === 'izin_pulang' || item.type === 'izin_pulang') {
+                                statusLabel = 'Izin Pulang';
+                            }
                             allHistory.push({
                                 tanggal: dateKey,
                                 nama: item.name,
-                                status: item.status === 'hadir' ? 'Masuk' : 'Pulang',
+                                status: statusLabel,
                                 waktu: item.jamAbsen || item.time || '--:--',
                                 type: item.type || 'check_in',
                                 jarak: item.location && item.location.distance ? 
-                                    item.location.distance.toFixed(1) + 'm' : '-'
+                                    item.location.distance.toFixed(1) + 'm' : '-',
+                                note: item.note || ''
                             });
                         }
                     });
@@ -1694,7 +1951,7 @@ async function exportExcel() {
             [`Radius Absen: ${GPS_RADIUS} meter dari titik lokasi`],
             GPS_LOCATION ? [`Titik Lokasi: ${GPS_LOCATION.lat.toFixed(6)}, ${GPS_LOCATION.lng.toFixed(6)}`] : ['Titik Lokasi: Belum diatur'],
             [],
-            ['No', 'Tanggal', 'Nama', 'Status', 'Waktu', 'Jarak dari Titik']
+            ['No', 'Tanggal', 'Nama', 'Status', 'Waktu', 'Jarak', 'Catatan']
         ];
 
         allHistory.forEach((item, index) => {
@@ -1709,7 +1966,8 @@ async function exportExcel() {
                 item.nama,
                 item.status,
                 item.waktu,
-                item.jarak
+                item.jarak,
+                item.note
             ]);
         });
 
@@ -1718,8 +1976,10 @@ async function exportExcel() {
         
         const masukCount = allHistory.filter(h => h.status === 'Masuk').length;
         const pulangCount = allHistory.filter(h => h.status === 'Pulang').length;
+        const izinCount = allHistory.filter(h => h.status === 'Izin Pulang').length;
         excelData.push(['Total Masuk:', masukCount]);
         excelData.push(['Total Pulang:', pulangCount]);
+        excelData.push(['Total Izin Pulang:', izinCount]);
 
         const ws = XLSX.utils.aoa_to_sheet(excelData);
         
@@ -1727,17 +1987,18 @@ async function exportExcel() {
             { wch: 5 },
             { wch: 15 },
             { wch: 20 },
+            { wch: 14 },
             { wch: 12 },
-            { wch: 12 },
-            { wch: 15 }
+            { wch: 15 },
+            { wch: 20 }
         ];
 
         ws['!merges'] = [
-            { s: { r: 0, c: 0 }, e: { r: 0, c: 5 } },
-            { s: { r: 1, c: 0 }, e: { r: 1, c: 5 } },
-            { s: { r: 2, c: 0 }, e: { r: 2, c: 5 } },
-            { s: { r: 3, c: 0 }, e: { r: 3, c: 5 } },
-            { s: { r: 4, c: 0 }, e: { r: 4, c: 5 } }
+            { s: { r: 0, c: 0 }, e: { r: 0, c: 6 } },
+            { s: { r: 1, c: 0 }, e: { r: 1, c: 6 } },
+            { s: { r: 2, c: 0 }, e: { r: 2, c: 6 } },
+            { s: { r: 3, c: 0 }, e: { r: 3, c: 6 } },
+            { s: { r: 4, c: 0 }, e: { r: 4, c: 6 } }
         ];
 
         XLSX.utils.book_append_sheet(wb, ws, 'Absensi');
@@ -1993,7 +2254,6 @@ async function detectLoop(timestamp) {
                 const existing = STATE.detectedFaces.find(f => f.id === matchId);
                 if (!existing) {
                     STATE.detectedFaces.push({ id: matchId, name: matchName });
-                    // 🔥 Panggil autoAbsen dengan cooldown yang sudah diperbaiki
                     await autoAbsen(matchName, matchId);
                 }
             } else {
@@ -2592,6 +2852,73 @@ startBtn.addEventListener('click', startDetection);
 stopBtn.addEventListener('click', stopDetection);
 resetBtn.addEventListener('click', resetSemua);
 syncBtn.addEventListener('click', syncFacesToFirebase);
+
+// SYNC ALL BUTTON
+if (syncAllBtn) {
+    syncAllBtn.addEventListener('click', async function() {
+        const btn = this;
+        const originalHtml = btn.innerHTML;
+        
+        const code = prompt('Masukkan Kode Akses untuk sinkronisasi semua data:');
+        if (code === null) return;
+        
+        if (code !== ACCESS_CODE) {
+            showToast('❌ Kode akses salah!', 'error');
+            return;
+        }
+        
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sinkron...';
+        btn.disabled = true;
+        
+        await syncAllData();
+        
+        btn.innerHTML = originalHtml;
+        btn.disabled = false;
+    });
+}
+
+// IZIN PULANG BUTTON
+if (izinPulangBtn) {
+    izinPulangBtn.addEventListener('click', openIzinPulangModal);
+}
+
+// IZIN PULANG MODAL EVENTS
+if (closeIzinPulangModal) {
+    closeIzinPulangModal.addEventListener('click', closeIzinPulangModalFn);
+}
+
+if (cancelIzinBtn) {
+    cancelIzinBtn.addEventListener('click', closeIzinPulangModalFn);
+}
+
+if (submitIzinBtn) {
+    submitIzinBtn.addEventListener('click', submitIzinPulang);
+}
+
+if (izinPulangModal) {
+    izinPulangModal.addEventListener('click', (e) => {
+        if (e.target === izinPulangModal) {
+            closeIzinPulangModalFn();
+        }
+    });
+}
+
+// IZIN PULANG - ENTER KEY SUPPORT
+if (izinNamaInput) {
+    izinNamaInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            if (izinAccessCode) izinAccessCode.focus();
+        }
+    });
+}
+
+if (izinAccessCode) {
+    izinAccessCode.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            submitIzinPulang();
+        }
+    });
+}
 
 showRegisterBtn.addEventListener('click', openRegisterModal);
 closeModalBtn.addEventListener('click', closeRegisterModal);
