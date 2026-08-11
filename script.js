@@ -1,4 +1,93 @@
 // ============================================================
+// IP WHITELIST - HANYA IP TERTENTU YANG BOLEH AKSES
+// ============================================================
+const ALLOWED_IPS = [
+    '36.79.207.155',  // IP Anda
+    // Tambahkan IP lain jika perlu, misal:
+    // '192.168.1.100',
+    // '123.123.123.123'
+];
+
+async function checkIpWhitelist() {
+    try {
+        // Ambil IP publik pengguna
+        const response = await fetch('https://api.ipify.org?format=json');
+        const data = await response.json();
+        const userIp = data.ip;
+        
+        console.log('🌐 IP Pengguna:', userIp);
+        console.log('📋 IP yang diizinkan:', ALLOWED_IPS);
+        
+        // Cek apakah IP termasuk dalam daftar yang diizinkan
+        const isAllowed = ALLOWED_IPS.some(allowedIp => {
+            // Bandingkan IP (case insensitive untuk IPv6)
+            return allowedIp.toLowerCase() === userIp.toLowerCase();
+        });
+        
+        if (!isAllowed) {
+            // Tampilkan pesan blokir di seluruh halaman
+            document.body.innerHTML = `
+                <div style="
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: center;
+                    height: 100vh;
+                    background: #0a0c0f;
+                    color: #eaeef2;
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    text-align: center;
+                    padding: 20px;
+                ">
+                    <div style="
+                        background: #1a1a2e;
+                        padding: 40px 50px;
+                        border-radius: 20px;
+                        border: 2px solid #e74c3c;
+                        max-width: 500px;
+                        box-shadow: 0 0 60px rgba(231, 76, 60, 0.2);
+                    ">
+                        <div style="font-size: 64px; margin-bottom: 20px;">🚫</div>
+                        <h1 style="color: #e74c3c; margin: 0 0 10px 0;">Akses Ditolak</h1>
+                        <p style="color: #8a9aaa; font-size: 16px; margin: 10px 0;">
+                            Hanya perangkat yang terdaftar yang dapat mengakses halaman ini.
+                        </p>
+                        <div style="
+                            background: #0a0c0f;
+                            padding: 10px 15px;
+                            border-radius: 8px;
+                            margin: 20px 0;
+                            font-size: 13px;
+                            color: #6a7e94;
+                            word-break: break-all;
+                        ">
+                            <strong>IP Anda:</strong> ${userIp}
+                            <br>
+                            <span style="color: #e74c3c;">❌ Tidak terdaftar</span>
+                        </div>
+                        <p style="color: #4a5a6a; font-size: 12px;">
+                            Hubungi administrator untuk pendaftaran perangkat.
+                        </p>
+                    </div>
+                </div>
+            `;
+            document.body.style.margin = '0';
+            return false;
+        }
+        
+        console.log('✅ IP terdaftar! Akses diizinkan.');
+        return true;
+        
+    } catch (error) {
+        console.error('❌ Gagal memeriksa IP:', error);
+        // Jika gagal cek IP, izinkan akses (atau blokir sesuai kebutuhan)
+        // Untuk keamanan lebih tinggi, ubah return false
+        showToast('⚠️ Gagal verifikasi IP, akses diizinkan', 'warning');
+        return true;
+    }
+}
+
+// ============================================================
 // FIREBASE CONFIG - REALTIME DATABASE
 // ============================================================
 const firebaseConfig = {
@@ -2402,6 +2491,13 @@ async function registerFace() {
 // INITIALIZE
 // ============================================================
 async function initApp() {
+    // 🔥 CEK IP WHITELIST TERLEBIH DAHULU
+    const isAllowed = await checkIpWhitelist();
+    if (!isAllowed) {
+        // Jika tidak diizinkan, hentikan inisialisasi
+        return;
+    }
+
     try {
         await db.ref('.info/connected').once('value');
         updateFirebaseStatus(true);
