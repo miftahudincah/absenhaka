@@ -3,9 +3,6 @@
 // ============================================================
 const ALLOWED_IPS = [
     '36.79.207.155',
-    // Tambahkan IP lain jika perlu, misal:
-    // '192.168.1.100',
-    // '123.123.123.123'
 ];
 
 async function checkIpWhitelist() {
@@ -93,10 +90,8 @@ const firebaseConfig = {
     appId: "1:766102925023:web:f180d54c586c8c6382036a"
 };
 
-// Inisialisasi Firebase
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
-
 console.log('🔥 Firebase Realtime Database initialized');
 
 // ============================================================
@@ -113,10 +108,15 @@ let JAM_PULANG_MULAI = 15;
 // ============================================================
 // GPS - LOKASI ABSEN (DEFAULT: SIDOARJO)
 // ============================================================
-const GPS_RADIUS = 100; // 100 meter
+const GPS_RADIUS = 100;
 const DEFAULT_LAT = -7.272305;
 const DEFAULT_LNG = 112.666827;
 let GPS_LOCATION = { lat: DEFAULT_LAT, lng: DEFAULT_LNG };
+
+// ============================================================
+// FACE MATCHING THRESHOLD
+// ============================================================
+const FACE_MATCH_THRESHOLD = 0.5;
 
 // ============================================================
 // CLOCK
@@ -174,7 +174,9 @@ const STATE = {
     today: new Date().toISOString().split('T')[0],
     mapInstance: null,
     mapMarker: null,
-    mapCircle: null
+    mapCircle: null,
+    // 🔥 Tambahan untuk mencegah duplicate
+    processedFaces: new Set()
 };
 
 // ============================================================
@@ -187,7 +189,6 @@ const placeholderCam = document.getElementById('placeholderCam');
 const faceListEl = document.getElementById('faceList');
 const totalCount = document.getElementById('totalCount');
 
-// Modal DOM - Registrasi
 const registerModal = document.getElementById('registerModal');
 const showRegisterBtn = document.getElementById('showRegisterBtn');
 const closeModalBtn = document.getElementById('closeRegisterModal');
@@ -202,7 +203,6 @@ const previewCtx = previewOverlay.getContext('2d');
 const previewPlaceholder = document.getElementById('previewPlaceholder');
 const previewInfo = document.getElementById('previewInfo');
 
-// Modal DOM - Pengaturan Jam
 const jamModal = document.getElementById('jamModal');
 const jamInfoBadge = document.getElementById('jamInfoBadge');
 const closeJamBtn = document.getElementById('closeJamModal');
@@ -215,7 +215,6 @@ const jamStatus = document.getElementById('jamStatus');
 const jamMasukDisplay = document.getElementById('jamMasukDisplay');
 const jamPulangDisplay = document.getElementById('jamPulangDisplay');
 
-// Modal DOM - GPS (Leaflet)
 const gpsModal = document.getElementById('gpsModal');
 const gpsBadge = document.getElementById('gpsBadge');
 const gpsStatus = document.getElementById('gpsStatus');
@@ -229,7 +228,6 @@ const gpsLatDisplay = document.getElementById('gpsLatDisplay');
 const gpsLngDisplay = document.getElementById('gpsLngDisplay');
 const gpsStatusMsg = document.getElementById('gpsStatusMsg');
 
-// Modal DOM - Export Excel
 const exportModal = document.getElementById('exportModal');
 const exportExcelBtn = document.getElementById('exportExcelBtn');
 const closeExportBtn = document.getElementById('closeExportModal');
@@ -239,7 +237,6 @@ const exportWeek = document.getElementById('exportWeek');
 const exportYear = document.getElementById('exportYear');
 const exportStatus = document.getElementById('exportStatus');
 
-// Controls DOM
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const resetBtn = document.getElementById('resetBtn');
@@ -587,29 +584,25 @@ async function loadHistoryFromFirebase() {
 }
 
 // ============================================================
-// FUNGSI LOAD SETTINGS (JAM KERJA & GPS) DARI FIREBASE
+// FUNGSI LOAD SETTINGS DARI FIREBASE
 // ============================================================
 async function loadSettingsFromFirebase() {
     try {
         console.log('⏳ Memuat settings dari Firebase...');
         
-        // 🔥 CEK APAKAH DATA SETTINGS ADA
         const settingsSnapshot = await db.ref('settings').once('value');
         const settingsData = settingsSnapshot.val();
         console.log('📋 Data settings dari Firebase:', settingsData);
         
-        // JIKA TIDAK ADA, BUAT DATA DEFAULT
         if (!settingsData) {
             console.log('⚠️ Tidak ada data settings di Firebase, membuat default...');
             
-            // Buat jam kerja default
             await db.ref('settings/jam_kerja').set({
                 jam_masuk_batas: JAM_MASUK_BATAS,
                 jam_pulang_mulai: JAM_PULANG_MULAI,
                 updatedAt: firebase.database.ServerValue.TIMESTAMP
             });
             
-            // Buat GPS default
             await db.ref('settings/gps').set({
                 lat: DEFAULT_LAT,
                 lng: DEFAULT_LNG,
@@ -620,14 +613,11 @@ async function loadSettingsFromFirebase() {
             console.log('✅ Data settings default berhasil dibuat di Firebase');
             showToast('✅ Pengaturan default tersimpan di Firebase', 'success');
             
-            // Update display
             updateJamDisplay();
             updateGpsDisplay();
             return true;
         }
         
-        // JIKA ADA, LOAD DATA
-        // Load jam kerja
         if (settingsData.jam_kerja) {
             if (settingsData.jam_kerja.jam_masuk_batas !== undefined) {
                 JAM_MASUK_BATAS = settingsData.jam_kerja.jam_masuk_batas;
@@ -639,7 +629,6 @@ async function loadSettingsFromFirebase() {
             console.log('✅ Jam kerja dimuat dari Firebase:', JAM_MASUK_BATAS, JAM_PULANG_MULAI);
         }
         
-        // Load GPS
         if (settingsData.gps && settingsData.gps.lat && settingsData.gps.lng) {
             GPS_LOCATION = { lat: settingsData.gps.lat, lng: settingsData.gps.lng };
             updateGpsDisplay();
@@ -656,11 +645,10 @@ async function loadSettingsFromFirebase() {
 }
 
 // ============================================================
-// FUNGSI SAVE SETTINGS (JAM KERJA & GPS) KE FIREBASE
+// FUNGSI SAVE SETTINGS KE FIREBASE
 // ============================================================
 async function saveSettingsToFirebase() {
     try {
-        // Simpan jam kerja
         await db.ref('settings/jam_kerja').set({
             jam_masuk_batas: JAM_MASUK_BATAS,
             jam_pulang_mulai: JAM_PULANG_MULAI,
@@ -668,7 +656,6 @@ async function saveSettingsToFirebase() {
         });
         console.log('✅ Jam kerja tersimpan di Firebase');
 
-        // Simpan GPS
         if (GPS_LOCATION) {
             await db.ref('settings/gps').set({
                 lat: GPS_LOCATION.lat,
@@ -687,38 +674,6 @@ async function saveSettingsToFirebase() {
         return false;
     }
 }
-
-// ============================================================
-// FUNGSI SAVE SETTINGS KE FIREBASE (TANPA TOAST - UNTUK INIT)
-// ============================================================
-async function saveSettingsToFirebaseSilent() {
-    try {
-        await db.ref('settings/jam_kerja').set({
-            jam_masuk_batas: JAM_MASUK_BATAS,
-            jam_pulang_mulai: JAM_PULANG_MULAI,
-            updatedAt: firebase.database.ServerValue.TIMESTAMP
-        });
-        console.log('✅ Jam kerja tersimpan di Firebase (silent)');
-
-        if (GPS_LOCATION) {
-            await db.ref('settings/gps').set({
-                lat: GPS_LOCATION.lat,
-                lng: GPS_LOCATION.lng,
-                radius: GPS_RADIUS,
-                updatedAt: firebase.database.ServerValue.TIMESTAMP
-            });
-            console.log('✅ GPS tersimpan di Firebase (silent)');
-        }
-        return true;
-    } catch (error) {
-        console.error('❌ Gagal simpan settings silent:', error);
-        return false;
-    }
-}
-
-// ============================================================
-// FIREBASE REALTIME DATABASE FUNCTIONS (LANJUTAN)
-// ============================================================
 
 async function saveGpsToFirebase(lat, lng) {
     try {
@@ -803,11 +758,15 @@ async function syncFacesToFirebase() {
 }
 
 // ============================================================
-// AUTO ATTENDANCE FUNCTIONS - DENGAN GPS
+// AUTO ATTENDANCE FUNCTIONS - DIPERBAIKI UNTUK MENCEGAH DUPLICATE
 // ============================================================
 async function autoAbsen(name, id) {
     const now = Date.now();
-    if (STATE.autoAbsenCooldown[id] && (now - STATE.autoAbsenCooldown[id] < 5000)) {
+    
+    // 🔥 COOLDOWN PER NAMA (10 detik) - mencegah duplicate
+    const cooldownKey = name;
+    if (STATE.autoAbsenCooldown[cooldownKey] && (now - STATE.autoAbsenCooldown[cooldownKey] < 10000)) {
+        console.log(`⏳ ${name} - Cooldown aktif, lewati`);
         return;
     }
 
@@ -815,70 +774,44 @@ async function autoAbsen(name, id) {
     const timeStr = new Date().toLocaleTimeString('id-ID', { hour12: false });
     const { bisaMasuk, bisaPulang, jam, menit } = cekJamAbsen();
     
+    // 🔥 CEK SUDAH ADA ABSENSI HARI INI UNTUK NAMA INI
     const existingHistory = STATE.attendanceHistory.find(h =>
         h.name === name && h.date === today
     );
 
     try {
-        // 🔥 CEK LOKASI GPS
         const lokasi = await cekLokasi();
         if (!lokasi.valid) {
             showToast(`📍 ${name} - ${lokasi.error}`, 'warning');
-            STATE.autoAbsenCooldown[id] = Date.now();
+            STATE.autoAbsenCooldown[cooldownKey] = Date.now();
             return;
         }
 
-        if (!existingHistory) {
-            if (bisaMasuk) {
-                const record = {
-                    name: name,
-                    status: 'hadir',
-                    type: 'check_in',
-                    timestamp: firebase.database.ServerValue.TIMESTAMP,
-                    date: today,
-                    time: timeStr,
-                    jamAbsen: `${String(jam).padStart(2, '0')}:${String(menit).padStart(2, '0')}`,
-                    clientTime: new Date().toISOString(),
-                    location: {
-                        lat: lokasi.lat,
-                        lng: lokasi.lng,
-                        distance: lokasi.distance
-                    }
-                };
-
-                const ref = db.ref('attendance/' + today + '/individuals').push();
-                await ref.set(record);
-
-                STATE.attendanceHistory.unshift({
-                    id: ref.key,
-                    name: name,
-                    status: 'hadir',
-                    time: timeStr,
-                    date: today,
-                    timestamp: Date.now(),
-                    type: 'check_in',
-                    jamAbsen: record.jamAbsen,
-                    location: record.location
-                });
-
-                STATE.attendance[id] = true;
-                STATE.autoAbsenCooldown[id] = Date.now();
-
-                renderList();
-                renderHistory();
-                updateAbsenCount();
-                updateStatusBar();
-
-                showToast(`✅ ${name} - Absen Masuk ${timeStr} (${lokasi.distance.toFixed(1)}m dari titik)`, 'auto');
-                console.log(`✅ Absen Masuk: ${name} pada ${timeStr}, jarak ${lokasi.distance.toFixed(1)}m`);
-                return;
-            } 
-            else if (jam >= JAM_MASUK_BATAS && jam < JAM_PULANG_MULAI) {
-                showToast(`⏰ ${name} - Melewati batas absen masuk (${JAM_MASUK_BATAS}:00)`, 'warning');
-                console.log(`⏰ ${name} - Melewati batas absen masuk`);
+        // 🔥 JIKA SUDAH ADA ABSENSI, JANGAN TAMBAH LAGI
+        if (existingHistory) {
+            const isCheckIn = existingHistory.type === 'check_in' || existingHistory.type === 'auto_check_in';
+            
+            // Jika sudah check_in dan belum waktunya pulang
+            if (isCheckIn && !bisaPulang) {
+                console.log(`ℹ️ ${name} - Sudah absen masuk, tunggu jam pulang`);
+                STATE.autoAbsenCooldown[cooldownKey] = Date.now();
                 return;
             }
-            else if (bisaPulang) {
+            
+            // Jika sudah check_in dan sudah waktunya pulang -> update ke pulang
+            if (isCheckIn && bisaPulang) {
+                // Cek apakah sudah ada status pulang hari ini
+                const existingPulang = STATE.attendanceHistory.find(h =>
+                    h.name === name && h.date === today && h.status === 'pulang'
+                );
+                
+                if (existingPulang) {
+                    console.log(`ℹ️ ${name} - Sudah absen pulang hari ini`);
+                    STATE.autoAbsenCooldown[cooldownKey] = Date.now();
+                    return;
+                }
+                
+                // Update check_in menjadi pulang
                 const record = {
                     name: name,
                     status: 'pulang',
@@ -895,48 +828,104 @@ async function autoAbsen(name, id) {
                     }
                 };
 
+                // Hapus yang lama
+                await db.ref('attendance/' + today + '/individuals/' + existingHistory.id).remove();
+
+                // Simpan yang baru
                 const ref = db.ref('attendance/' + today + '/individuals').push();
                 await ref.set(record);
 
-                STATE.attendanceHistory.unshift({
-                    id: ref.key,
-                    name: name,
-                    status: 'pulang',
-                    time: timeStr,
-                    date: today,
-                    timestamp: Date.now(),
-                    type: 'check_out',
-                    jamAbsen: record.jamAbsen,
-                    location: record.location
-                });
+                // Update state
+                const index = STATE.attendanceHistory.findIndex(h => h.id === existingHistory.id);
+                if (index !== -1) {
+                    STATE.attendanceHistory[index] = {
+                        id: ref.key,
+                        name: name,
+                        status: 'pulang',
+                        time: timeStr,
+                        date: today,
+                        timestamp: Date.now(),
+                        type: 'check_out',
+                        jamAbsen: record.jamAbsen,
+                        location: record.location
+                    };
+                }
 
-                STATE.attendance[id] = true;
-                STATE.autoAbsenCooldown[id] = Date.now();
+                STATE.updateCount++;
+                STATE.lastUpdateTime = Date.now();
+                STATE.autoAbsenCooldown[cooldownKey] = Date.now();
 
-                renderList();
                 renderHistory();
-                updateAbsenCount();
                 updateStatusBar();
 
-                showToast(`✅ ${name} - Absen Pulang ${timeStr} (${lokasi.distance.toFixed(1)}m dari titik)`, 'auto');
-                console.log(`✅ Absen Pulang: ${name} pada ${timeStr}, jarak ${lokasi.distance.toFixed(1)}m`);
+                showToast(`✅ ${name} - Absen Pulang ${timeStr} (${lokasi.distance.toFixed(1)}m)`, 'update');
+                console.log(`✅ Absen Pulang: ${name} pada ${timeStr}`);
                 return;
             }
+            
+            // Jika sudah pulang, jangan tambah lagi
+            if (existingHistory.status === 'pulang') {
+                console.log(`ℹ️ ${name} - Sudah pulang hari ini`);
+                STATE.autoAbsenCooldown[cooldownKey] = Date.now();
+                return;
+            }
+            
+            STATE.autoAbsenCooldown[cooldownKey] = Date.now();
             return;
         }
 
-        const isCheckIn = existingHistory.type === 'check_in' || existingHistory.type === 'auto_check_in';
-        const isCheckOut = existingHistory.type === 'check_out' || existingHistory.type === 'update_time';
-        
-        if (isCheckIn && !bisaPulang) {
-            const jamPulangStr = `${String(JAM_PULANG_MULAI).padStart(2, '0')}:00`;
-            showToast(`ℹ️ ${name} - Sudah absen masuk hari ini. Waktu pulang pukul ${jamPulangStr}`, 'info');
-            console.log(`ℹ️ ${name} - Sudah absen masuk, belum waktunya pulang (${JAM_PULANG_MULAI}:00)`);
-            STATE.autoAbsenCooldown[id] = Date.now();
+        // 🔥 BELUM ADA ABSENSI - BUAT BARU
+        if (bisaMasuk) {
+            const record = {
+                name: name,
+                status: 'hadir',
+                type: 'check_in',
+                timestamp: firebase.database.ServerValue.TIMESTAMP,
+                date: today,
+                time: timeStr,
+                jamAbsen: `${String(jam).padStart(2, '0')}:${String(menit).padStart(2, '0')}`,
+                clientTime: new Date().toISOString(),
+                location: {
+                    lat: lokasi.lat,
+                    lng: lokasi.lng,
+                    distance: lokasi.distance
+                }
+            };
+
+            const ref = db.ref('attendance/' + today + '/individuals').push();
+            await ref.set(record);
+
+            STATE.attendanceHistory.unshift({
+                id: ref.key,
+                name: name,
+                status: 'hadir',
+                time: timeStr,
+                date: today,
+                timestamp: Date.now(),
+                type: 'check_in',
+                jamAbsen: record.jamAbsen,
+                location: record.location
+            });
+
+            STATE.attendance[id] = true;
+            STATE.autoAbsenCooldown[cooldownKey] = Date.now();
+
+            renderList();
+            renderHistory();
+            updateAbsenCount();
+            updateStatusBar();
+
+            showToast(`✅ ${name} - Absen Masuk ${timeStr} (${lokasi.distance.toFixed(1)}m)`, 'auto');
+            console.log(`✅ Absen Masuk: ${name} pada ${timeStr}`);
+            return;
+        } 
+        else if (jam >= JAM_MASUK_BATAS && jam < JAM_PULANG_MULAI) {
+            showToast(`⏰ ${name} - Melewati batas absen masuk (${JAM_MASUK_BATAS}:00)`, 'warning');
+            console.log(`⏰ ${name} - Melewati batas absen masuk`);
+            STATE.autoAbsenCooldown[cooldownKey] = Date.now();
             return;
         }
-        
-        if (isCheckIn && bisaPulang) {
+        else if (bisaPulang) {
             const record = {
                 name: name,
                 status: 'pulang',
@@ -953,89 +942,36 @@ async function autoAbsen(name, id) {
                 }
             };
 
-            await db.ref('attendance/' + today + '/individuals/' + existingHistory.id).remove();
-
             const ref = db.ref('attendance/' + today + '/individuals').push();
             await ref.set(record);
 
-            const index = STATE.attendanceHistory.findIndex(h => h.id === existingHistory.id);
-            if (index !== -1) {
-                STATE.attendanceHistory[index] = {
-                    id: ref.key,
-                    name: name,
-                    status: 'pulang',
-                    time: timeStr,
-                    date: today,
-                    timestamp: Date.now(),
-                    type: 'check_out',
-                    jamAbsen: record.jamAbsen,
-                    location: record.location
-                };
-            }
-
-            STATE.updateCount++;
-            STATE.lastUpdateTime = Date.now();
-            STATE.autoAbsenCooldown[id] = Date.now();
-
-            renderHistory();
-            updateStatusBar();
-
-            showToast(`✅ ${name} - Absen Pulang ${timeStr} (${lokasi.distance.toFixed(1)}m dari titik)`, 'update');
-            console.log(`✅ Absen Pulang: ${name} pada ${timeStr}, jarak ${lokasi.distance.toFixed(1)}m`);
-            return;
-        }
-        
-        if (isCheckOut) {
-            const record = {
+            STATE.attendanceHistory.unshift({
+                id: ref.key,
                 name: name,
                 status: 'pulang',
-                type: 'update_time',
-                timestamp: firebase.database.ServerValue.TIMESTAMP,
-                date: today,
                 time: timeStr,
-                jamAbsen: `${String(jam).padStart(2, '0')}:${String(menit).padStart(2, '0')}`,
-                clientTime: new Date().toISOString(),
-                location: {
-                    lat: lokasi.lat,
-                    lng: lokasi.lng,
-                    distance: lokasi.distance
-                }
-            };
+                date: today,
+                timestamp: Date.now(),
+                type: 'check_out',
+                jamAbsen: record.jamAbsen,
+                location: record.location
+            });
 
-            await db.ref('attendance/' + today + '/individuals/' + existingHistory.id).remove();
+            STATE.attendance[id] = true;
+            STATE.autoAbsenCooldown[cooldownKey] = Date.now();
 
-            const ref = db.ref('attendance/' + today + '/individuals').push();
-            await ref.set(record);
-
-            const index = STATE.attendanceHistory.findIndex(h => h.id === existingHistory.id);
-            if (index !== -1) {
-                STATE.attendanceHistory[index] = {
-                    id: ref.key,
-                    name: name,
-                    status: 'pulang',
-                    time: timeStr,
-                    date: today,
-                    timestamp: Date.now(),
-                    type: 'update_time',
-                    jamAbsen: record.jamAbsen,
-                    location: record.location
-                };
-            }
-
-            STATE.updateCount++;
-            STATE.lastUpdateTime = Date.now();
-            STATE.autoAbsenCooldown[id] = Date.now();
-
+            renderList();
             renderHistory();
+            updateAbsenCount();
             updateStatusBar();
 
-            showToast(`🔄 ${name} - Update Pulang ${timeStr} (${lokasi.distance.toFixed(1)}m dari titik)`, 'update');
-            console.log(`🔄 Update Pulang: ${name} -> ${timeStr}, jarak ${lokasi.distance.toFixed(1)}m`);
+            showToast(`✅ ${name} - Absen Pulang ${timeStr} (${lokasi.distance.toFixed(1)}m)`, 'auto');
+            console.log(`✅ Absen Pulang: ${name} pada ${timeStr}`);
             return;
         }
 
     } catch (error) {
-        console.error('❌ Gagal auto absen/update:', error);
+        console.error('❌ Gagal auto absen:', error);
     }
 }
 
@@ -1098,7 +1034,18 @@ function renderHistory() {
         return;
     }
 
-    todayHistory.slice(0, 20).forEach(item => {
+    // 🔥 UNIQUE: Hanya tampilkan 1 entry per nama per hari
+    const uniqueHistory = [];
+    const seenNames = new Set();
+    
+    for (const item of todayHistory) {
+        if (!seenNames.has(item.name)) {
+            seenNames.add(item.name);
+            uniqueHistory.push(item);
+        }
+    }
+
+    uniqueHistory.slice(0, 20).forEach(item => {
         const statusClass = item.status === 'hadir' ? 'hadir' : 'pulang';
         const statusLabel = item.status === 'hadir' ? '✔ Masuk' : '🚪 Pulang';
         const isCheckIn = item.type === 'check_in' || item.type === 'auto_check_in';
@@ -1206,6 +1153,7 @@ async function hapusWajahWithToken(id) {
     STATE.registered = STATE.registered.filter(item => item.id !== id);
     delete STATE.attendance[id];
     delete STATE.autoAbsenCooldown[id];
+    delete STATE.autoAbsenCooldown[face.name];
 
     renderList();
     STATE.lastSync = Date.now();
@@ -1370,7 +1318,6 @@ async function saveJamSettings() {
     
     updateJamDisplay();
     
-    // 🔥 SIMPAN KE FIREBASE
     await saveSettingsToFirebase();
     
     closeJamModal();
@@ -1380,7 +1327,7 @@ async function saveJamSettings() {
 }
 
 // ============================================================
-// PENGATURAN GPS - MENGGUNAKAN LEAFLET (TANPA GOOGLE MAPS API)
+// PENGATURAN GPS - LEAFLET
 // ============================================================
 
 let gpsMapInstance = null;
@@ -1946,7 +1893,6 @@ async function detectLoop(timestamp) {
         if (detections.length === 0) {
             ctx.clearRect(0, 0, overlay.width, overlay.height);
             STATE.detectedFaces = [];
-            updateStatusBar();
             requestAnimationFrame(detectLoop);
             return;
         }
@@ -1982,7 +1928,8 @@ async function detectLoop(timestamp) {
                 try {
                     const regDesc = new Float32Array(reg.descriptor);
                     const dist = faceapi.euclideanDistance(descriptor, regDesc);
-                    if (dist < minDist) {
+                    
+                    if (dist < minDist && dist < FACE_MATCH_THRESHOLD) {
                         minDist = dist;
                         matchId = reg.id;
                         matchName = reg.name;
@@ -2043,16 +1990,18 @@ async function detectLoop(timestamp) {
                 if (hadir && hasUpdate) label = `🔄 ${matchName} ↻`;
                 ctx.fillText(label, x + 6, y - 6);
 
-                STATE.detectedFaces.push({ id: matchId, name: matchName });
-
-                await autoAbsen(matchName, matchId);
+                const existing = STATE.detectedFaces.find(f => f.id === matchId);
+                if (!existing) {
+                    STATE.detectedFaces.push({ id: matchId, name: matchName });
+                    // 🔥 Panggil autoAbsen dengan cooldown yang sudah diperbaiki
+                    await autoAbsen(matchName, matchId);
+                }
             } else {
                 ctx.fillText('👤 ?', x + 6, y - 6);
             }
         }
 
         ctx.shadowBlur = 0;
-        updateStatusBar();
 
     } catch (err) {
         console.warn('Deteksi error:', err);
@@ -2542,7 +2491,7 @@ async function registerFace() {
                 const regDesc = new Float32Array(reg.descriptor);
                 const dist = faceapi.euclideanDistance(descriptor, regDesc);
                 console.log(`Distance to "${reg.name}":`, dist);
-                if (dist < 0.45) {
+                if (dist < FACE_MATCH_THRESHOLD) {
                     duplicate = true;
                     duplicateName = reg.name;
                     break;
@@ -2587,7 +2536,6 @@ async function registerFace() {
 // INITIALIZE
 // ============================================================
 async function initApp() {
-    // 🔥 CEK IP WHITELIST TERLEBIH DAHULU
     const isAllowed = await checkIpWhitelist();
     if (!isAllowed) {
         return;
@@ -2598,7 +2546,6 @@ async function initApp() {
         updateFirebaseStatus(true);
         console.log('✅ Firebase Realtime Database terhubung');
 
-        // 🔥 LOAD SETTINGS - OTOMATIS BUAT DEFAULT JIKA TIDAK ADA
         console.log('⏳ Memulai loadSettingsFromFirebase...');
         await loadSettingsFromFirebase();
 
