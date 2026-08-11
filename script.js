@@ -119,6 +119,30 @@ let GPS_LOCATION = { lat: DEFAULT_LAT, lng: DEFAULT_LNG };
 const FACE_MATCH_THRESHOLD = 0.5;
 
 // ============================================================
+// FUNGSI GET LOCAL DATE (FIX TIMEZONE)
+// ============================================================
+function getLocalDate() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function formatLocalDate(dateStr) {
+    if (!dateStr) return '-';
+    try {
+        const parts = dateStr.split('-');
+        if (parts.length === 3) {
+            return `${parts[2]}/${parts[1]}/${parts[0]}`;
+        }
+        return dateStr;
+    } catch {
+        return dateStr;
+    }
+}
+
+// ============================================================
 // CLOCK
 // ============================================================
 function updateClock() {
@@ -172,7 +196,7 @@ const STATE = {
     isGpsModalOpen: false,
     isIzinPulangModalOpen: false,
     modelLoadingPromise: null,
-    today: new Date().toISOString().split('T')[0],
+    today: getLocalDate(),
     mapInstance: null,
     mapMarker: null,
     mapCircle: null,
@@ -411,7 +435,7 @@ function updateStatusBar() {
 }
 
 function updateAbsenCount() {
-    const today = new Date().toISOString().split('T')[0];
+    const today = getLocalDate();
     const count = STATE.attendanceHistory.filter(h => h.date === today && h.status === 'hadir').length;
     absenCount.textContent = count;
 }
@@ -591,7 +615,7 @@ async function loadFacesFromFirebase() {
 
 async function loadHistoryFromFirebase() {
     try {
-        const today = new Date().toISOString().split('T')[0];
+        const today = getLocalDate();
         const snapshot = await db.ref('attendance/' + today + '/individuals').once('value');
         const data = snapshot.val();
         const history = [];
@@ -767,6 +791,49 @@ async function deleteFaceFromFirebase(id) {
     }
 }
 
+// ============================================================
+// FUNGSI DELETE WAJAH + SEMUA RIWAYAT ABSENSI
+// ============================================================
+async function deleteFaceAndHistoryFromFirebase(id, name) {
+    try {
+        // 1. Hapus data wajah
+        await db.ref('faces/' + id).remove();
+        console.log(`🗑️ Wajah ${id} (${name}) dihapus dari Realtime DB`);
+        
+        // 2. Hapus SEMUA riwayat absensi untuk nama ini
+        const snapshot = await db.ref('attendance').once('value');
+        const data = snapshot.val();
+        let deletedCount = 0;
+        
+        if (data) {
+            const updates = {};
+            Object.keys(data).forEach(dateKey => {
+                const dayData = data[dateKey];
+                if (dayData && dayData.individuals) {
+                    Object.keys(dayData.individuals).forEach(recordId => {
+                        const record = dayData.individuals[recordId];
+                        if (record.name === name) {
+                            updates[`attendance/${dateKey}/individuals/${recordId}`] = null;
+                            deletedCount++;
+                        }
+                    });
+                }
+            });
+            
+            if (Object.keys(updates).length > 0) {
+                await db.ref().update(updates);
+                console.log(`🗑️ ${deletedCount} riwayat absensi untuk "${name}" dihapus dari Realtime DB`);
+            }
+        }
+        
+        return { success: true, deletedCount };
+        
+    } catch (error) {
+        console.error('❌ Gagal hapus wajah dan riwayat:', error);
+        return { success: false, deletedCount: 0, error: error.message };
+    }
+}
+
 async function syncFacesToFirebase() {
     if (STATE.isSyncing) return;
 
@@ -874,7 +941,7 @@ async function autoAbsen(name, id) {
         return;
     }
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = getLocalDate();
     const timeStr = new Date().toLocaleTimeString('id-ID', { hour12: false });
     const { bisaMasuk, bisaPulang, jam, menit } = cekJamAbsen();
     
@@ -1169,7 +1236,7 @@ function renderList() {
         const hasIzin = STATE.attendanceHistory.some(h => h.name === item.name && h.type === 'izin_pulang');
         
         // 🔥 CEK APAKAH ADA RIWAYAT LEMBUR HARI INI
-        const today = new Date().toISOString().split('T')[0];
+        const today = getLocalDate();
         const hasLembur = STATE.attendanceHistory.some(h => 
             h.name === item.name && 
             h.date === today && 
@@ -1193,7 +1260,7 @@ function renderList() {
                             ${lemburBadge}
                         </div>
                         <span class="status-badge ${statusClass}">${statusLabel} ${hasUpdate ? '🔄' : ''}</span>
-                        <button class="btn-hapus" data-id="${item.id}" title="Hapus Wajah">
+                        <button class="btn-hapus" data-id="${item.id}" title="Hapus Wajah + Semua Riwayat">
                             <i class="fas fa-trash-alt"></i>
                         </button>
                     </div>
@@ -1210,7 +1277,7 @@ function renderList() {
 }
 
 // ============================================================
-// RENDER HISTORY - MENAMPILKAN SEMUA RIWAYAT
+// RENDER HISTORY - MENAMPILKAN SEMUA RIWAYAT DENGAN TANGGAL
 // ============================================================
 function renderHistory() {
     const history = STATE.attendanceHistory;
@@ -1221,7 +1288,7 @@ function renderHistory() {
     }
 
     let html = '';
-    const today = new Date().toISOString().split('T')[0];
+    const today = getLocalDate();
     const todayHistory = history.filter(h => h.date === today);
 
     if (todayHistory.length === 0) {
@@ -1268,11 +1335,15 @@ function renderHistory() {
         const normalPulangInfo = item.jamPulangNormal !== undefined ? ` (normal ${item.jamPulangNormal}:00)` : '';
         const lemburInfo = item.lembur ? ` 🕐${item.lembur.label}${normalPulangInfo}` : '';
         
+        // 🔥 FORMAT TANGGAL KE DD/MM/YYYY
+        const tanggalFormatted = formatLocalDate(item.date);
+        
         html += `
                     <div class="history-item" data-id="${item.id}">
                         <span class="h-name"><i class="fas fa-user"></i> ${item.name}</span>
                         <span class="h-status ${statusClass}">${statusLabel}${badge}</span>
                         <span class="h-time"><i class="fas fa-clock"></i> ${jamTampil} ${jarak}${lemburInfo}${note}</span>
+                        <span class="h-date"><i class="fas fa-calendar-alt"></i> ${tanggalFormatted}</span>
                         <button class="btn-hapus-history" data-id="${item.id}" data-name="${item.name}" title="Hapus riwayat ini">
                             <i class="fas fa-trash-alt" style="font-size:0.6rem;color:#6a7e94;"></i>
                         </button>
@@ -1329,6 +1400,9 @@ async function tambahWajah(name, descriptor) {
     return id;
 }
 
+// ============================================================
+// HAPUS WAJAH + SEMUA RIWAYAT ABSENSI
+// ============================================================
 async function hapusWajahWithToken(id) {
     const face = STATE.registered.find(f => f.id === id);
     if (!face) {
@@ -1336,7 +1410,7 @@ async function hapusWajahWithToken(id) {
         return;
     }
 
-    const token = prompt(`⚠️ Konfirmasi Hapus "${face.name}"\n\nMasukkan Kode Akses untuk menghapus wajah ini:`);
+    const token = prompt(`⚠️ Konfirmasi Hapus "${face.name}"\n\nMasukkan Kode Akses untuk menghapus wajah ini dan SELURUH riwayat absensinya:`);
     
     if (token === null) {
         showToast('❌ Penghapusan dibatalkan', 'info');
@@ -1348,14 +1422,14 @@ async function hapusWajahWithToken(id) {
         return;
     }
 
-    if (!confirm(`⚠️ Yakin ingin menghapus wajah "${face.name}" dari Firebase?`)) {
+    if (!confirm(`⚠️ Yakin ingin menghapus wajah "${face.name}" dan SELURUH riwayat absensinya dari Firebase?\n\nTindakan ini TIDAK BISA dibatalkan!`)) {
         showToast('❌ Penghapusan dibatalkan', 'info');
         return;
     }
 
-    const deleted = await deleteFaceFromFirebase(id);
-    if (!deleted) {
-        showToast('❌ Gagal menghapus dari Firebase', 'error');
+    const result = await deleteFaceAndHistoryFromFirebase(id, face.name);
+    if (!result.success) {
+        showToast(`❌ Gagal menghapus: ${result.error || 'Unknown error'}`, 'error');
         return;
     }
 
@@ -1363,16 +1437,22 @@ async function hapusWajahWithToken(id) {
     delete STATE.attendance[id];
     delete STATE.autoAbsenCooldown[id];
     delete STATE.autoAbsenCooldown[face.name];
+    STATE.attendanceHistory = STATE.attendanceHistory.filter(item => item.name !== face.name);
 
     renderList();
+    renderHistory();
     STATE.lastSync = Date.now();
     updateLastSync();
     updateStatusBar();
+    updateAbsenCount();
 
-    showToast(`🗑️ Wajah "${face.name}" berhasil dihapus dari Firebase`, 'success');
+    showToast(`🗑️ Wajah "${face.name}" dan ${result.deletedCount} riwayat absensinya berhasil dihapus dari Firebase`, 'success');
     registerStatus.textContent = 'Siap mendaftar';
 }
 
+// ============================================================
+// HAPUS SATU RIWAYAT ABSENSI
+// ============================================================
 async function hapusHistoryItem(id, name) {
     if (!id) {
         showToast('❌ Data tidak valid', 'error');
@@ -1397,7 +1477,7 @@ async function hapusHistoryItem(id, name) {
     }
 
     try {
-        const today = new Date().toISOString().split('T')[0];
+        const today = getLocalDate();
         await db.ref('attendance/' + today + '/individuals/' + id).remove();
         
         STATE.attendanceHistory = STATE.attendanceHistory.filter(item => item.id !== id);
@@ -1422,13 +1502,82 @@ async function hapusHistoryItem(id, name) {
     }
 }
 
-async function resetSemua() {
-    if (STATE.registered.length === 0) {
-        showToast('Tidak ada data', 'info');
+// ============================================================
+// HAPUS SEMUA RIWAYAT UNTUK SATU NAMA (OPSIONAL)
+// ============================================================
+async function hapusSemuaRiwayatNama(name) {
+    if (!name) {
+        showToast('❌ Nama tidak valid', 'error');
         return;
     }
 
-    const token = prompt('⚠️ KONFIRMASI RESET SEMUA DATA\n\nMasukkan Kode Akses untuk menghapus SEMUA data dari Firebase:');
+    const token = prompt(`⚠️ Konfirmasi Hapus SEMUA Riwayat "${name}"\n\nMasukkan Kode Akses untuk menghapus SEMUA riwayat absensi "${name}":`);
+    
+    if (token === null) {
+        showToast('❌ Penghapusan dibatalkan', 'info');
+        return;
+    }
+    
+    if (token !== ACCESS_CODE) {
+        showToast('❌ Kode akses salah! Penghapusan dibatalkan.', 'error');
+        return;
+    }
+
+    if (!confirm(`⚠️ Yakin ingin menghapus SEMUA riwayat absensi "${name}"?\n\nTindakan ini TIDAK BISA dibatalkan!`)) {
+        showToast('❌ Penghapusan dibatalkan', 'info');
+        return;
+    }
+
+    try {
+        const snapshot = await db.ref('attendance').once('value');
+        const data = snapshot.val();
+        let deletedCount = 0;
+        
+        if (data) {
+            const updates = {};
+            Object.keys(data).forEach(dateKey => {
+                const dayData = data[dateKey];
+                if (dayData && dayData.individuals) {
+                    Object.keys(dayData.individuals).forEach(recordId => {
+                        const record = dayData.individuals[recordId];
+                        if (record.name === name) {
+                            updates[`attendance/${dateKey}/individuals/${recordId}`] = null;
+                            deletedCount++;
+                        }
+                    });
+                }
+            });
+            
+            if (Object.keys(updates).length > 0) {
+                await db.ref().update(updates);
+                console.log(`🗑️ ${deletedCount} riwayat untuk "${name}" dihapus`);
+            }
+        }
+        
+        STATE.attendanceHistory = STATE.attendanceHistory.filter(item => item.name !== name);
+        
+        const reg = STATE.registered.find(r => r.name === name);
+        if (reg) {
+            STATE.attendance[reg.id] = false;
+        }
+        
+        renderHistory();
+        updateAbsenCount();
+        updateStatusBar();
+        
+        showToast(`🗑️ ${deletedCount} riwayat "${name}" berhasil dihapus`, 'success');
+        
+    } catch (error) {
+        console.error('❌ Gagal hapus semua riwayat:', error);
+        showToast('❌ Gagal hapus semua riwayat: ' + error.message, 'error');
+    }
+}
+
+// ============================================================
+// RESET SEMUA DATA
+// ============================================================
+async function resetSemua() {
+    const token = prompt('⚠️ KONFIRMASI RESET SEMUA DATA\n\nMasukkan Kode Akses untuk menghapus SEMUA data dari Firebase (wajah + riwayat):');
     
     if (token === null) {
         showToast('❌ Reset dibatalkan', 'info');
@@ -1440,16 +1589,18 @@ async function resetSemua() {
         return;
     }
 
-    if (!confirm('⚠️ Yakin ingin menghapus SEMUA data dari Firebase? Tindakan ini tidak bisa dibatalkan!')) {
+    if (!confirm('⚠️ Yakin ingin menghapus SEMUA data dari Firebase?\n\n- Semua wajah terdaftar\n- Semua riwayat absensi\n\nTindakan ini TIDAK BISA dibatalkan!')) {
         showToast('❌ Reset dibatalkan', 'info');
         return;
     }
 
     try {
         await db.ref('faces').remove();
+        await db.ref('attendance').remove();
 
         STATE.registered = [];
         STATE.attendance = {};
+        STATE.attendanceHistory = [];
         STATE.detectedFaces = [];
         STATE.autoAbsenCooldown = {};
         STATE.updateCount = 0;
@@ -1458,9 +1609,12 @@ async function resetSemua() {
         updateLastSync();
 
         renderList();
+        renderHistory();
         updateStatusBar();
+        updateAbsenCount();
         registerStatus.textContent = 'Semua data direset dari Firebase';
-        showToast('🔄 Semua data dihapus dari Firebase', 'info');
+        showToast('🔄 Semua data (wajah + riwayat) dihapus dari Firebase', 'info');
+        
     } catch (error) {
         console.error('❌ Gagal reset data:', error);
         showToast('❌ Gagal reset: ' + error.message, 'error');
@@ -1867,7 +2021,7 @@ async function submitIzinPulang() {
         return;
     }
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = getLocalDate();
     const timeStr = new Date().toLocaleTimeString('id-ID', { hour12: false });
     const now = new Date();
     const jam = now.getHours();
