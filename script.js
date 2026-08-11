@@ -1034,38 +1034,40 @@ async function autoAbsen(name, id) {
 }
 
 // ============================================================
-// RENDER FUNCTIONS
+// RENDER FUNCTIONS - MENAMPILKAN SEMUA DATA
 // ============================================================
+
 function renderList() {
     const list = STATE.registered;
     
-    const uniqueMap = new Map();
-    list.forEach(item => {
-        if (!uniqueMap.has(item.name)) {
-            uniqueMap.set(item.name, item);
-        }
-    });
-    const uniqueList = Array.from(uniqueMap.values());
-    
-    totalCount.textContent = uniqueList.length;
+    // 🔥 TAMPILKAN SEMUA WAJAH (TERMASUK DUPLICATE)
+    totalCount.textContent = list.length;
 
-    if (uniqueList.length === 0) {
+    if (list.length === 0) {
         faceListEl.innerHTML = `<div class="empty-list">Belum ada wajah terdaftar di Firebase</div>`;
         return;
     }
 
     let html = '';
-    uniqueList.forEach((item) => {
+    list.forEach((item) => {
         const hadir = STATE.attendance[item.id] === true;
         const statusClass = hadir ? 'hadir' : 'tidak-hadir';
         const statusLabel = hadir ? '✔ Hadir' : '✘ Tidak';
         const hasUpdate = STATE.attendanceHistory.some(h => h.name === item.name && h.type === 'update_time');
+        const hasIzin = STATE.attendanceHistory.some(h => h.name === item.name && h.type === 'izin_pulang');
+        
+        let extraBadge = '';
+        if (hadir && hasUpdate) extraBadge = 'updated';
+        else if (hadir && hasIzin) extraBadge = 'izin';
+        else if (hadir) extraBadge = 'auto';
+        
         html += `
                     <div class="face-item" data-id="${item.id}">
                         <div class="name">
                             <i class="fas fa-user-circle"></i>
                             <span>${item.name}</span>
-                            ${hadir ? `<span style="font-size:0.6rem;color:#b06af0;margin-left:0.3rem;"><i class="fas fa-magic"></i> ${hasUpdate ? 'updated' : 'auto'}</span>` : ''}
+                            ${hadir ? `<span style="font-size:0.6rem;color:#b06af0;margin-left:0.3rem;"><i class="fas fa-magic"></i> ${extraBadge}</span>` : ''}
+                            ${hasIzin ? `<span style="font-size:0.6rem;color:#f39c12;margin-left:0.2rem;">📝</span>` : ''}
                         </div>
                         <span class="status-badge ${statusClass}">${statusLabel} ${hasUpdate ? '🔄' : ''}</span>
                         <button class="btn-hapus" data-id="${item.id}" title="Hapus Wajah">
@@ -1085,7 +1087,7 @@ function renderList() {
 }
 
 // ============================================================
-// RENDER HISTORY - DENGAN STATUS IZIN PULANG
+// RENDER HISTORY - MENAMPILKAN SEMUA RIWAYAT
 // ============================================================
 function renderHistory() {
     const history = STATE.attendanceHistory;
@@ -1104,17 +1106,10 @@ function renderHistory() {
         return;
     }
 
-    const uniqueHistory = [];
-    const seenNames = new Set();
-    
-    for (const item of todayHistory) {
-        if (!seenNames.has(item.name)) {
-            seenNames.add(item.name);
-            uniqueHistory.push(item);
-        }
-    }
+    // 🔥 TAMPILKAN SEMUA RIWAYAT (TIDAK HANYA 1 PER NAMA)
+    const sortedHistory = [...todayHistory].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
-    uniqueHistory.slice(0, 20).forEach(item => {
+    sortedHistory.slice(0, 50).forEach(item => {
         let statusClass = 'pulang';
         let statusLabel = '🚪 Pulang';
         let badge = ' <span class="h-update">pulang</span>';
