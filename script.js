@@ -3,7 +3,6 @@
 // ============================================================
 const ALLOWED_IPS = [
     '36.79.207.155',
-    'IP_BARU_ANDA',  // IP Anda
     // Tambahkan IP lain jika perlu, misal:
     // '192.168.1.100',
     // '123.123.123.123'
@@ -11,7 +10,6 @@ const ALLOWED_IPS = [
 
 async function checkIpWhitelist() {
     try {
-        // Ambil IP publik pengguna
         const response = await fetch('https://api.ipify.org?format=json');
         const data = await response.json();
         const userIp = data.ip;
@@ -19,14 +17,11 @@ async function checkIpWhitelist() {
         console.log('🌐 IP Pengguna:', userIp);
         console.log('📋 IP yang diizinkan:', ALLOWED_IPS);
         
-        // Cek apakah IP termasuk dalam daftar yang diizinkan
         const isAllowed = ALLOWED_IPS.some(allowedIp => {
-            // Bandingkan IP (case insensitive untuk IPv6)
             return allowedIp.toLowerCase() === userIp.toLowerCase();
         });
         
         if (!isAllowed) {
-            // Tampilkan pesan blokir di seluruh halaman
             document.body.innerHTML = `
                 <div style="
                     display: flex;
@@ -81,9 +76,6 @@ async function checkIpWhitelist() {
         
     } catch (error) {
         console.error('❌ Gagal memeriksa IP:', error);
-        // Jika gagal cek IP, izinkan akses (atau blokir sesuai kebutuhan)
-        // Untuk keamanan lebih tinggi, ubah return false
-        showToast('⚠️ Gagal verifikasi IP, akses diizinkan', 'warning');
         return true;
     }
 }
@@ -121,10 +113,10 @@ let JAM_PULANG_MULAI = 15;
 // ============================================================
 // GPS - LOKASI ABSEN (DEFAULT: SIDOARJO)
 // ============================================================
-const GPS_RADIUS = 100; // 10 meter
+const GPS_RADIUS = 100; // 100 meter
 const DEFAULT_LAT = -7.272305;
 const DEFAULT_LNG = 112.666827;
-let GPS_LOCATION = { lat: DEFAULT_LAT, lng: DEFAULT_LNG }; // Set default langsung
+let GPS_LOCATION = { lat: DEFAULT_LAT, lng: DEFAULT_LNG };
 
 // ============================================================
 // CLOCK
@@ -500,7 +492,7 @@ function cekLokasi() {
 // HITUNG JARAK (Haversine Formula)
 // ============================================================
 function getDistance(lat1, lon1, lat2, lon2) {
-    const R = 6371000; // Radius bumi dalam meter
+    const R = 6371000;
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
     const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
@@ -594,28 +586,139 @@ async function loadHistoryFromFirebase() {
     }
 }
 
-async function loadGpsFromFirebase() {
+// ============================================================
+// FUNGSI LOAD SETTINGS (JAM KERJA & GPS) DARI FIREBASE
+// ============================================================
+async function loadSettingsFromFirebase() {
     try {
-        const snapshot = await db.ref('settings/gps').once('value');
-        const data = snapshot.val();
-        if (data && data.lat && data.lng) {
-            GPS_LOCATION = { lat: data.lat, lng: data.lng };
+        console.log('⏳ Memuat settings dari Firebase...');
+        
+        // 🔥 CEK APAKAH DATA SETTINGS ADA
+        const settingsSnapshot = await db.ref('settings').once('value');
+        const settingsData = settingsSnapshot.val();
+        console.log('📋 Data settings dari Firebase:', settingsData);
+        
+        // JIKA TIDAK ADA, BUAT DATA DEFAULT
+        if (!settingsData) {
+            console.log('⚠️ Tidak ada data settings di Firebase, membuat default...');
+            
+            // Buat jam kerja default
+            await db.ref('settings/jam_kerja').set({
+                jam_masuk_batas: JAM_MASUK_BATAS,
+                jam_pulang_mulai: JAM_PULANG_MULAI,
+                updatedAt: firebase.database.ServerValue.TIMESTAMP
+            });
+            
+            // Buat GPS default
+            await db.ref('settings/gps').set({
+                lat: DEFAULT_LAT,
+                lng: DEFAULT_LNG,
+                radius: GPS_RADIUS,
+                updatedAt: firebase.database.ServerValue.TIMESTAMP
+            });
+            
+            console.log('✅ Data settings default berhasil dibuat di Firebase');
+            showToast('✅ Pengaturan default tersimpan di Firebase', 'success');
+            
+            // Update display
+            updateJamDisplay();
             updateGpsDisplay();
-            console.log('📍 GPS dimuat dari Firebase:', GPS_LOCATION);
             return true;
         }
-        // Jika tidak ada di Firebase, gunakan default
-        GPS_LOCATION = { lat: DEFAULT_LAT, lng: DEFAULT_LNG };
-        updateGpsDisplay();
-        console.log('📍 GPS menggunakan default Sidoarjo:', GPS_LOCATION);
-        return false;
+        
+        // JIKA ADA, LOAD DATA
+        // Load jam kerja
+        if (settingsData.jam_kerja) {
+            if (settingsData.jam_kerja.jam_masuk_batas !== undefined) {
+                JAM_MASUK_BATAS = settingsData.jam_kerja.jam_masuk_batas;
+            }
+            if (settingsData.jam_kerja.jam_pulang_mulai !== undefined) {
+                JAM_PULANG_MULAI = settingsData.jam_kerja.jam_pulang_mulai;
+            }
+            updateJamDisplay();
+            console.log('✅ Jam kerja dimuat dari Firebase:', JAM_MASUK_BATAS, JAM_PULANG_MULAI);
+        }
+        
+        // Load GPS
+        if (settingsData.gps && settingsData.gps.lat && settingsData.gps.lng) {
+            GPS_LOCATION = { lat: settingsData.gps.lat, lng: settingsData.gps.lng };
+            updateGpsDisplay();
+            console.log('✅ GPS dimuat dari Firebase:', GPS_LOCATION);
+        }
+        
+        return true;
+        
     } catch (error) {
-        console.error('❌ Gagal load GPS:', error);
-        GPS_LOCATION = { lat: DEFAULT_LAT, lng: DEFAULT_LNG };
-        updateGpsDisplay();
+        console.error('❌ Gagal load settings:', error);
+        showToast('❌ Gagal load settings: ' + error.message, 'error');
         return false;
     }
 }
+
+// ============================================================
+// FUNGSI SAVE SETTINGS (JAM KERJA & GPS) KE FIREBASE
+// ============================================================
+async function saveSettingsToFirebase() {
+    try {
+        // Simpan jam kerja
+        await db.ref('settings/jam_kerja').set({
+            jam_masuk_batas: JAM_MASUK_BATAS,
+            jam_pulang_mulai: JAM_PULANG_MULAI,
+            updatedAt: firebase.database.ServerValue.TIMESTAMP
+        });
+        console.log('✅ Jam kerja tersimpan di Firebase');
+
+        // Simpan GPS
+        if (GPS_LOCATION) {
+            await db.ref('settings/gps').set({
+                lat: GPS_LOCATION.lat,
+                lng: GPS_LOCATION.lng,
+                radius: GPS_RADIUS,
+                updatedAt: firebase.database.ServerValue.TIMESTAMP
+            });
+            console.log('✅ GPS tersimpan di Firebase');
+        }
+
+        showToast('✅ Semua pengaturan tersimpan ke Firebase', 'success');
+        return true;
+    } catch (error) {
+        console.error('❌ Gagal simpan settings:', error);
+        showToast('❌ Gagal simpan settings: ' + error.message, 'error');
+        return false;
+    }
+}
+
+// ============================================================
+// FUNGSI SAVE SETTINGS KE FIREBASE (TANPA TOAST - UNTUK INIT)
+// ============================================================
+async function saveSettingsToFirebaseSilent() {
+    try {
+        await db.ref('settings/jam_kerja').set({
+            jam_masuk_batas: JAM_MASUK_BATAS,
+            jam_pulang_mulai: JAM_PULANG_MULAI,
+            updatedAt: firebase.database.ServerValue.TIMESTAMP
+        });
+        console.log('✅ Jam kerja tersimpan di Firebase (silent)');
+
+        if (GPS_LOCATION) {
+            await db.ref('settings/gps').set({
+                lat: GPS_LOCATION.lat,
+                lng: GPS_LOCATION.lng,
+                radius: GPS_RADIUS,
+                updatedAt: firebase.database.ServerValue.TIMESTAMP
+            });
+            console.log('✅ GPS tersimpan di Firebase (silent)');
+        }
+        return true;
+    } catch (error) {
+        console.error('❌ Gagal simpan settings silent:', error);
+        return false;
+    }
+}
+
+// ============================================================
+// FIREBASE REALTIME DATABASE FUNCTIONS (LANJUTAN)
+// ============================================================
 
 async function saveGpsToFirebase(lat, lng) {
     try {
@@ -1266,10 +1369,14 @@ async function saveJamSettings() {
     JAM_PULANG_MULAI = pulang;
     
     updateJamDisplay();
+    
+    // 🔥 SIMPAN KE FIREBASE
+    await saveSettingsToFirebase();
+    
     closeJamModal();
     
     showToast(`✅ Jam kerja diperbarui: Masuk ≤ ${JAM_MASUK_BATAS}:00 | Pulang ≥ ${JAM_PULANG_MULAI}:00`, 'success');
-    console.log('✅ Pengaturan jam kerja berhasil diubah');
+    console.log('✅ Pengaturan jam kerja berhasil diubah dan disimpan ke Firebase');
 }
 
 // ============================================================
@@ -1288,7 +1395,6 @@ function initGpsMap(lat = DEFAULT_LAT, lng = DEFAULT_LNG) {
         return;
     }
 
-    // Inisialisasi Leaflet Map
     gpsMapInstance = L.map('gpsMap', {
         center: [lat, lng],
         zoom: 17,
@@ -1297,13 +1403,11 @@ function initGpsMap(lat = DEFAULT_LAT, lng = DEFAULT_LNG) {
         attributionControl: true
     });
 
-    // Tile Layer (OpenStreetMap)
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         maxZoom: 19
     }).addTo(gpsMapInstance);
 
-    // Geocoder untuk search
     gpsGeocoder = L.Control.geocoder({
         defaultMarkGeocode: false,
         position: 'topleft',
@@ -1320,21 +1424,18 @@ function initGpsMap(lat = DEFAULT_LAT, lng = DEFAULT_LNG) {
         }
     }).addTo(gpsMapInstance);
 
-    // Click on map
     gpsMapInstance.on('click', function(e) {
         const lat = e.latlng.lat;
         const lng = e.latlng.lng;
         updateGpsMarker(lat, lng);
     });
 
-    // Tambahkan skala
     L.control.scale({
         position: 'bottomright',
         metric: true,
         imperial: false
     }).addTo(gpsMapInstance);
 
-    // Tambahkan legend radius
     const legend = L.control({ position: 'bottomleft' });
     legend.onAdd = function() {
         const div = L.DomUtil.create('div', 'info legend');
@@ -1349,7 +1450,6 @@ function initGpsMap(lat = DEFAULT_LAT, lng = DEFAULT_LNG) {
     };
     legend.addTo(gpsMapInstance);
 
-    // Trigger resize setelah map siap
     setTimeout(() => {
         if (gpsMapInstance) {
             gpsMapInstance.invalidateSize();
@@ -1363,7 +1463,6 @@ function updateGpsMarker(lat, lng) {
     if (gpsMarker) {
         gpsMarker.setLatLng([lat, lng]);
     } else {
-        // Custom icon
         const redIcon = L.divIcon({
             className: 'custom-div-icon',
             html: `<div style="background-color:#e74c3c;width:20px;height:20px;border-radius:50%;border:3px solid white;box-shadow:0 0 10px rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;position:relative;top:-10px;left:-10px;"></div>`,
@@ -1427,10 +1526,8 @@ function openGpsModal() {
         gpsStatusMsg.style.color = GPS_LOCATION ? '#2ecc71' : '#6a7e94';
     }
     
-    // Tunggu modal terbuka sebelum inisialisasi map
     setTimeout(() => {
         initGpsMap(defaultLat, defaultLng);
-        // Trigger resize untuk Leaflet
         setTimeout(() => {
             if (gpsMapInstance) {
                 gpsMapInstance.invalidateSize();
@@ -1497,11 +1594,9 @@ async function saveGpsLocation() {
     console.log('✅ Lokasi GPS berhasil disimpan');
 }
 
-// Event listener untuk search input dengan Leaflet Geocoder
 if (gpsSearchInput) {
     gpsSearchInput.addEventListener('keydown', function(e) {
         if (e.key === 'Enter') {
-            // Trigger geocoder search
             if (gpsGeocoder && this.value.trim()) {
                 gpsGeocoder.geocode(this.value.trim(), function(results) {
                     if (results && results.length > 0) {
@@ -2495,7 +2590,6 @@ async function initApp() {
     // 🔥 CEK IP WHITELIST TERLEBIH DAHULU
     const isAllowed = await checkIpWhitelist();
     if (!isAllowed) {
-        // Jika tidak diizinkan, hentikan inisialisasi
         return;
     }
 
@@ -2504,9 +2598,12 @@ async function initApp() {
         updateFirebaseStatus(true);
         console.log('✅ Firebase Realtime Database terhubung');
 
+        // 🔥 LOAD SETTINGS - OTOMATIS BUAT DEFAULT JIKA TIDAK ADA
+        console.log('⏳ Memulai loadSettingsFromFirebase...');
+        await loadSettingsFromFirebase();
+
         await loadFacesFromFirebase();
         await loadHistoryFromFirebase();
-        await loadGpsFromFirebase();
 
         STATE.lastSync = Date.now();
         updateLastSync();
@@ -2525,7 +2622,7 @@ async function initApp() {
         console.log('Data wajah:', STATE.registered.length, 'orang');
         console.log('📋 Jam Masuk Batas:', JAM_MASUK_BATAS + ':00');
         console.log('📋 Jam Pulang Mulai:', JAM_PULANG_MULAI + ':00');
-        console.log('📍 Lokasi Absen (Sidoarjo):', GPS_LOCATION ? `${GPS_LOCATION.lat}, ${GPS_LOCATION.lng}` : 'Belum diatur');
+        console.log('📍 Lokasi Absen:', GPS_LOCATION ? `${GPS_LOCATION.lat}, ${GPS_LOCATION.lng}` : 'Belum diatur');
 
         if (!STATE.modelLoaded) {
             loadAllModels();
@@ -2549,7 +2646,6 @@ stopBtn.addEventListener('click', stopDetection);
 resetBtn.addEventListener('click', resetSemua);
 syncBtn.addEventListener('click', syncFacesToFirebase);
 
-// Registrasi
 showRegisterBtn.addEventListener('click', openRegisterModal);
 closeModalBtn.addEventListener('click', closeRegisterModal);
 cancelRegisterBtn.addEventListener('click', closeRegisterModal);
@@ -2573,7 +2669,6 @@ accessCode.addEventListener('keydown', (e) => {
     }
 });
 
-// Pengaturan Jam
 jamInfoBadge.addEventListener('click', openJamModal);
 closeJamBtn.addEventListener('click', closeJamModal);
 cancelJamBtn.addEventListener('click', closeJamModal);
@@ -2603,7 +2698,6 @@ jamPulangInput.addEventListener('keydown', (e) => {
     }
 });
 
-// GPS - Leaflet
 gpsBadge.addEventListener('click', openGpsModal);
 closeGpsBtn.addEventListener('click', closeGpsModal);
 cancelGpsBtn.addEventListener('click', closeGpsModal);
@@ -2621,7 +2715,6 @@ gpsAccessCode.addEventListener('keydown', (e) => {
     }
 });
 
-// Export Excel
 exportExcelBtn.addEventListener('click', openExportModal);
 closeExportBtn.addEventListener('click', closeExportModal);
 cancelExportBtn.addEventListener('click', closeExportModal);
