@@ -23,6 +23,20 @@ console.log('🔥 Firebase Realtime Database initialized');
 const ACCESS_CODE = "zaki5go";
 
 // ============================================================
+// JAM KERJA - DEFAULT
+// ============================================================
+let JAM_MASUK_BATAS = 10;
+let JAM_PULANG_MULAI = 15;
+
+// ============================================================
+// GPS - LOKASI ABSEN (DEFAULT: SIDOARJO)
+// ============================================================
+const GPS_RADIUS = 10; // 10 meter
+const DEFAULT_LAT = -7.272305;
+const DEFAULT_LNG = 112.666827;
+let GPS_LOCATION = { lat: DEFAULT_LAT, lng: DEFAULT_LNG }; // Set default langsung
+
+// ============================================================
 // CLOCK
 // ============================================================
 function updateClock() {
@@ -54,6 +68,7 @@ const STATE = {
     isDetecting: false,
     modelLoaded: false,
     stream: null,
+    previewStream: null,
     detectedFaces: [],
     faceCount: 0,
     isRegistering: false,
@@ -68,7 +83,16 @@ const STATE = {
         tinyFaceDetector: false,
         faceLandmark68: false,
         faceRecognition: false
-    }
+    },
+    isModalOpen: false,
+    isJamModalOpen: false,
+    isExportModalOpen: false,
+    isGpsModalOpen: false,
+    modelLoadingPromise: null,
+    today: new Date().toISOString().split('T')[0],
+    mapInstance: null,
+    mapMarker: null,
+    mapCircle: null
 };
 
 // ============================================================
@@ -80,10 +104,60 @@ const ctx = overlay.getContext('2d');
 const placeholderCam = document.getElementById('placeholderCam');
 const faceListEl = document.getElementById('faceList');
 const totalCount = document.getElementById('totalCount');
+
+// Modal DOM - Registrasi
+const registerModal = document.getElementById('registerModal');
+const showRegisterBtn = document.getElementById('showRegisterBtn');
+const closeModalBtn = document.getElementById('closeRegisterModal');
+const cancelRegisterBtn = document.getElementById('cancelRegisterBtn');
 const registerName = document.getElementById('registerName');
 const accessCode = document.getElementById('accessCode');
 const registerBtn = document.getElementById('registerBtn');
 const registerStatus = document.getElementById('registerStatus');
+const previewVideo = document.getElementById('previewVideo');
+const previewOverlay = document.getElementById('previewOverlay');
+const previewCtx = previewOverlay.getContext('2d');
+const previewPlaceholder = document.getElementById('previewPlaceholder');
+const previewInfo = document.getElementById('previewInfo');
+
+// Modal DOM - Pengaturan Jam
+const jamModal = document.getElementById('jamModal');
+const jamInfoBadge = document.getElementById('jamInfoBadge');
+const closeJamBtn = document.getElementById('closeJamModal');
+const cancelJamBtn = document.getElementById('cancelJamBtn');
+const saveJamBtn = document.getElementById('saveJamBtn');
+const jamAccessCode = document.getElementById('jamAccessCode');
+const jamMasukInput = document.getElementById('jamMasukInput');
+const jamPulangInput = document.getElementById('jamPulangInput');
+const jamStatus = document.getElementById('jamStatus');
+const jamMasukDisplay = document.getElementById('jamMasukDisplay');
+const jamPulangDisplay = document.getElementById('jamPulangDisplay');
+
+// Modal DOM - GPS (Leaflet)
+const gpsModal = document.getElementById('gpsModal');
+const gpsBadge = document.getElementById('gpsBadge');
+const gpsStatus = document.getElementById('gpsStatus');
+const closeGpsBtn = document.getElementById('closeGpsModal');
+const cancelGpsBtn = document.getElementById('cancelGpsBtn');
+const saveGpsBtn = document.getElementById('saveGpsBtn');
+const gpsAccessCode = document.getElementById('gpsAccessCode');
+const gpsSearchInput = document.getElementById('gpsSearchInput');
+const gpsMap = document.getElementById('gpsMap');
+const gpsLatDisplay = document.getElementById('gpsLatDisplay');
+const gpsLngDisplay = document.getElementById('gpsLngDisplay');
+const gpsStatusMsg = document.getElementById('gpsStatusMsg');
+
+// Modal DOM - Export Excel
+const exportModal = document.getElementById('exportModal');
+const exportExcelBtn = document.getElementById('exportExcelBtn');
+const closeExportBtn = document.getElementById('closeExportModal');
+const cancelExportBtn = document.getElementById('cancelExportBtn');
+const doExportBtn = document.getElementById('doExportBtn');
+const exportWeek = document.getElementById('exportWeek');
+const exportYear = document.getElementById('exportYear');
+const exportStatus = document.getElementById('exportStatus');
+
+// Controls DOM
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const resetBtn = document.getElementById('resetBtn');
@@ -126,6 +200,35 @@ function showToast(msg, type = 'info') {
     toast.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => toast.classList.remove('show'), 3000);
+}
+
+// ============================================================
+// UPDATE JAM DISPLAY
+// ============================================================
+function updateJamDisplay() {
+    if (jamMasukDisplay) jamMasukDisplay.textContent = JAM_MASUK_BATAS;
+    if (jamPulangDisplay) jamPulangDisplay.textContent = JAM_PULANG_MULAI;
+    if (jamMasukInput) jamMasukInput.value = JAM_MASUK_BATAS;
+    if (jamPulangInput) jamPulangInput.value = JAM_PULANG_MULAI;
+    console.log(`📋 Jam kerja: Masuk ≤ ${JAM_MASUK_BATAS}:00 | Pulang ≥ ${JAM_PULANG_MULAI}:00`);
+}
+
+// ============================================================
+// UPDATE GPS DISPLAY
+// ============================================================
+function updateGpsDisplay() {
+    if (GPS_LOCATION) {
+        gpsStatus.textContent = `📍 ${GPS_LOCATION.lat.toFixed(6)}, ${GPS_LOCATION.lng.toFixed(6)}`;
+        gpsBadge.className = 'badge-gps active';
+        if (gpsStatusMsg) {
+            gpsStatusMsg.textContent = `✅ Lokasi aktif: ${GPS_LOCATION.lat.toFixed(6)}, ${GPS_LOCATION.lng.toFixed(6)} (Radius ${GPS_RADIUS}m)`;
+            gpsStatusMsg.style.color = '#2ecc71';
+        }
+    } else {
+        gpsStatus.textContent = 'Lokasi: Belum';
+        gpsBadge.className = 'badge-gps inactive';
+    }
+    console.log(`📍 GPS: ${GPS_LOCATION ? GPS_LOCATION.lat + ', ' + GPS_LOCATION.lng : 'Belum diatur'}`);
 }
 
 // ============================================================
@@ -223,6 +326,101 @@ function updateAbsenCount() {
 }
 
 // ============================================================
+// CEK JAM UNTUK ABSENSI
+// ============================================================
+function cekJamAbsen() {
+    const now = new Date();
+    const jam = now.getHours();
+    const menit = now.getMinutes();
+    const waktu = jam + menit / 60;
+    
+    const bisaMasuk = waktu < JAM_MASUK_BATAS;
+    const bisaPulang = waktu >= JAM_PULANG_MULAI;
+    
+    return { bisaMasuk, bisaPulang, jam, menit, waktu };
+}
+
+// ============================================================
+// CEK LOKASI GPS
+// ============================================================
+function cekLokasi() {
+    return new Promise((resolve) => {
+        if (!GPS_LOCATION) {
+            resolve({ valid: false, error: 'Lokasi absen belum diatur' });
+            return;
+        }
+
+        if (!navigator.geolocation) {
+            resolve({ valid: false, error: 'Browser tidak mendukung GPS' });
+            return;
+        }
+
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const userLat = position.coords.latitude;
+                const userLng = position.coords.longitude;
+                
+                const distance = getDistance(
+                    userLat, userLng,
+                    GPS_LOCATION.lat, GPS_LOCATION.lng
+                );
+                
+                if (distance <= GPS_RADIUS) {
+                    resolve({ 
+                        valid: true, 
+                        distance: distance,
+                        lat: userLat,
+                        lng: userLng
+                    });
+                } else {
+                    resolve({ 
+                        valid: false, 
+                        error: `Anda berada ${distance.toFixed(1)}m dari titik absen (maks ${GPS_RADIUS}m)`,
+                        distance: distance
+                    });
+                }
+            },
+            (error) => {
+                let msg = 'Gagal mendapatkan lokasi: ';
+                switch(error.code) {
+                    case error.PERMISSION_DENIED:
+                        msg += 'Izin lokasi ditolak';
+                        break;
+                    case error.POSITION_UNAVAILABLE:
+                        msg += 'Lokasi tidak tersedia';
+                        break;
+                    case error.TIMEOUT:
+                        msg += 'Waktu habis';
+                        break;
+                    default:
+                        msg += error.message;
+                }
+                resolve({ valid: false, error: msg });
+            },
+            {
+                enableHighAccuracy: true,
+                timeout: 10000,
+                maximumAge: 60000
+            }
+        );
+    });
+}
+
+// ============================================================
+// HITUNG JARAK (Haversine Formula)
+// ============================================================
+function getDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371000; // Radius bumi dalam meter
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+}
+
+// ============================================================
 // FIREBASE REALTIME DATABASE FUNCTIONS
 // ============================================================
 
@@ -286,7 +484,9 @@ async function loadHistoryFromFirebase() {
                         time: item.time || '--:--',
                         date: item.date || today,
                         timestamp: item.timestamp || 0,
-                        type: item.type || 'check_in'
+                        type: item.type || 'check_in',
+                        jamAbsen: item.jamAbsen || '--:--',
+                        location: item.location || null
                     });
                 }
             });
@@ -301,6 +501,45 @@ async function loadHistoryFromFirebase() {
     } catch (error) {
         console.error('❌ Gagal load history:', error);
         return [];
+    }
+}
+
+async function loadGpsFromFirebase() {
+    try {
+        const snapshot = await db.ref('settings/gps').once('value');
+        const data = snapshot.val();
+        if (data && data.lat && data.lng) {
+            GPS_LOCATION = { lat: data.lat, lng: data.lng };
+            updateGpsDisplay();
+            console.log('📍 GPS dimuat dari Firebase:', GPS_LOCATION);
+            return true;
+        }
+        // Jika tidak ada di Firebase, gunakan default
+        GPS_LOCATION = { lat: DEFAULT_LAT, lng: DEFAULT_LNG };
+        updateGpsDisplay();
+        console.log('📍 GPS menggunakan default Sidoarjo:', GPS_LOCATION);
+        return false;
+    } catch (error) {
+        console.error('❌ Gagal load GPS:', error);
+        GPS_LOCATION = { lat: DEFAULT_LAT, lng: DEFAULT_LNG };
+        updateGpsDisplay();
+        return false;
+    }
+}
+
+async function saveGpsToFirebase(lat, lng) {
+    try {
+        await db.ref('settings/gps').set({
+            lat: lat,
+            lng: lng,
+            radius: GPS_RADIUS,
+            updatedAt: firebase.database.ServerValue.TIMESTAMP
+        });
+        console.log('✅ GPS tersimpan di Firebase');
+        return true;
+    } catch (error) {
+        console.error('❌ Gagal simpan GPS:', error);
+        return false;
     }
 }
 
@@ -371,7 +610,7 @@ async function syncFacesToFirebase() {
 }
 
 // ============================================================
-// AUTO ATTENDANCE FUNCTIONS
+// AUTO ATTENDANCE FUNCTIONS - DENGAN GPS
 // ============================================================
 async function autoAbsen(name, id) {
     const now = Date.now();
@@ -381,22 +620,144 @@ async function autoAbsen(name, id) {
 
     const today = new Date().toISOString().split('T')[0];
     const timeStr = new Date().toLocaleTimeString('id-ID', { hour12: false });
-
+    const { bisaMasuk, bisaPulang, jam, menit } = cekJamAbsen();
+    
     const existingHistory = STATE.attendanceHistory.find(h =>
         h.name === name && h.date === today
     );
 
     try {
-        if (existingHistory) {
-            // UPDATE: sudah absen, update waktu terakhir
+        // 🔥 CEK LOKASI GPS
+        const lokasi = await cekLokasi();
+        if (!lokasi.valid) {
+            showToast(`📍 ${name} - ${lokasi.error}`, 'warning');
+            STATE.autoAbsenCooldown[id] = Date.now();
+            return;
+        }
+
+        if (!existingHistory) {
+            if (bisaMasuk) {
+                const record = {
+                    name: name,
+                    status: 'hadir',
+                    type: 'check_in',
+                    timestamp: firebase.database.ServerValue.TIMESTAMP,
+                    date: today,
+                    time: timeStr,
+                    jamAbsen: `${String(jam).padStart(2, '0')}:${String(menit).padStart(2, '0')}`,
+                    clientTime: new Date().toISOString(),
+                    location: {
+                        lat: lokasi.lat,
+                        lng: lokasi.lng,
+                        distance: lokasi.distance
+                    }
+                };
+
+                const ref = db.ref('attendance/' + today + '/individuals').push();
+                await ref.set(record);
+
+                STATE.attendanceHistory.unshift({
+                    id: ref.key,
+                    name: name,
+                    status: 'hadir',
+                    time: timeStr,
+                    date: today,
+                    timestamp: Date.now(),
+                    type: 'check_in',
+                    jamAbsen: record.jamAbsen,
+                    location: record.location
+                });
+
+                STATE.attendance[id] = true;
+                STATE.autoAbsenCooldown[id] = Date.now();
+
+                renderList();
+                renderHistory();
+                updateAbsenCount();
+                updateStatusBar();
+
+                showToast(`✅ ${name} - Absen Masuk ${timeStr} (${lokasi.distance.toFixed(1)}m dari titik)`, 'auto');
+                console.log(`✅ Absen Masuk: ${name} pada ${timeStr}, jarak ${lokasi.distance.toFixed(1)}m`);
+                return;
+            } 
+            else if (jam >= JAM_MASUK_BATAS && jam < JAM_PULANG_MULAI) {
+                showToast(`⏰ ${name} - Melewati batas absen masuk (${JAM_MASUK_BATAS}:00)`, 'warning');
+                console.log(`⏰ ${name} - Melewati batas absen masuk`);
+                return;
+            }
+            else if (bisaPulang) {
+                const record = {
+                    name: name,
+                    status: 'pulang',
+                    type: 'check_out',
+                    timestamp: firebase.database.ServerValue.TIMESTAMP,
+                    date: today,
+                    time: timeStr,
+                    jamAbsen: `${String(jam).padStart(2, '0')}:${String(menit).padStart(2, '0')}`,
+                    clientTime: new Date().toISOString(),
+                    location: {
+                        lat: lokasi.lat,
+                        lng: lokasi.lng,
+                        distance: lokasi.distance
+                    }
+                };
+
+                const ref = db.ref('attendance/' + today + '/individuals').push();
+                await ref.set(record);
+
+                STATE.attendanceHistory.unshift({
+                    id: ref.key,
+                    name: name,
+                    status: 'pulang',
+                    time: timeStr,
+                    date: today,
+                    timestamp: Date.now(),
+                    type: 'check_out',
+                    jamAbsen: record.jamAbsen,
+                    location: record.location
+                });
+
+                STATE.attendance[id] = true;
+                STATE.autoAbsenCooldown[id] = Date.now();
+
+                renderList();
+                renderHistory();
+                updateAbsenCount();
+                updateStatusBar();
+
+                showToast(`✅ ${name} - Absen Pulang ${timeStr} (${lokasi.distance.toFixed(1)}m dari titik)`, 'auto');
+                console.log(`✅ Absen Pulang: ${name} pada ${timeStr}, jarak ${lokasi.distance.toFixed(1)}m`);
+                return;
+            }
+            return;
+        }
+
+        const isCheckIn = existingHistory.type === 'check_in' || existingHistory.type === 'auto_check_in';
+        const isCheckOut = existingHistory.type === 'check_out' || existingHistory.type === 'update_time';
+        
+        if (isCheckIn && !bisaPulang) {
+            const jamPulangStr = `${String(JAM_PULANG_MULAI).padStart(2, '0')}:00`;
+            showToast(`ℹ️ ${name} - Sudah absen masuk hari ini. Waktu pulang pukul ${jamPulangStr}`, 'info');
+            console.log(`ℹ️ ${name} - Sudah absen masuk, belum waktunya pulang (${JAM_PULANG_MULAI}:00)`);
+            STATE.autoAbsenCooldown[id] = Date.now();
+            return;
+        }
+        
+        if (isCheckIn && bisaPulang) {
             const record = {
                 name: name,
-                status: 'hadir',
-                type: 'update_time',
+                status: 'pulang',
+                type: 'check_out',
                 timestamp: firebase.database.ServerValue.TIMESTAMP,
                 date: today,
                 time: timeStr,
-                clientTime: new Date().toISOString()
+                jamAbsen: `${String(jam).padStart(2, '0')}:${String(menit).padStart(2, '0')}`,
+                clientTime: new Date().toISOString(),
+                location: {
+                    lat: lokasi.lat,
+                    lng: lokasi.lng,
+                    distance: lokasi.distance
+                }
             };
 
             await db.ref('attendance/' + today + '/individuals/' + existingHistory.id).remove();
@@ -409,11 +770,13 @@ async function autoAbsen(name, id) {
                 STATE.attendanceHistory[index] = {
                     id: ref.key,
                     name: name,
-                    status: 'hadir',
+                    status: 'pulang',
                     time: timeStr,
                     date: today,
                     timestamp: Date.now(),
-                    type: 'update_time'
+                    type: 'check_out',
+                    jamAbsen: record.jamAbsen,
+                    location: record.location
                 };
             }
 
@@ -424,44 +787,58 @@ async function autoAbsen(name, id) {
             renderHistory();
             updateStatusBar();
 
-            showToast(`🔄 ${name} update waktu: ${timeStr}`, 'update');
-            console.log(`🔄 Update waktu: ${name} -> ${timeStr}`);
-
-        } else {
-            // ABSEN BARU: pertama kali absen hari ini
+            showToast(`✅ ${name} - Absen Pulang ${timeStr} (${lokasi.distance.toFixed(1)}m dari titik)`, 'update');
+            console.log(`✅ Absen Pulang: ${name} pada ${timeStr}, jarak ${lokasi.distance.toFixed(1)}m`);
+            return;
+        }
+        
+        if (isCheckOut) {
             const record = {
                 name: name,
-                status: 'hadir',
-                type: 'auto_check_in',
+                status: 'pulang',
+                type: 'update_time',
                 timestamp: firebase.database.ServerValue.TIMESTAMP,
                 date: today,
                 time: timeStr,
-                clientTime: new Date().toISOString()
+                jamAbsen: `${String(jam).padStart(2, '0')}:${String(menit).padStart(2, '0')}`,
+                clientTime: new Date().toISOString(),
+                location: {
+                    lat: lokasi.lat,
+                    lng: lokasi.lng,
+                    distance: lokasi.distance
+                }
             };
+
+            await db.ref('attendance/' + today + '/individuals/' + existingHistory.id).remove();
 
             const ref = db.ref('attendance/' + today + '/individuals').push();
             await ref.set(record);
 
-            STATE.attendanceHistory.unshift({
-                id: ref.key,
-                name: name,
-                status: 'hadir',
-                time: timeStr,
-                date: today,
-                timestamp: Date.now(),
-                type: 'auto_check_in'
-            });
+            const index = STATE.attendanceHistory.findIndex(h => h.id === existingHistory.id);
+            if (index !== -1) {
+                STATE.attendanceHistory[index] = {
+                    id: ref.key,
+                    name: name,
+                    status: 'pulang',
+                    time: timeStr,
+                    date: today,
+                    timestamp: Date.now(),
+                    type: 'update_time',
+                    jamAbsen: record.jamAbsen,
+                    location: record.location
+                };
+            }
 
-            STATE.attendance[id] = true;
+            STATE.updateCount++;
+            STATE.lastUpdateTime = Date.now();
             STATE.autoAbsenCooldown[id] = Date.now();
 
-            renderList();
             renderHistory();
-            updateAbsenCount();
             updateStatusBar();
 
-            showToast(`✅ ${name} berhasil absen otomatis! (${timeStr})`, 'auto');
-            console.log(`✅ Auto absen: ${name} pada ${timeStr}`);
+            showToast(`🔄 ${name} - Update Pulang ${timeStr} (${lokasi.distance.toFixed(1)}m dari titik)`, 'update');
+            console.log(`🔄 Update Pulang: ${name} -> ${timeStr}, jarak ${lokasi.distance.toFixed(1)}m`);
+            return;
         }
 
     } catch (error) {
@@ -495,8 +872,8 @@ function renderList() {
                             ${hadir ? `<span style="font-size:0.6rem;color:#b06af0;margin-left:0.3rem;"><i class="fas fa-magic"></i> ${hasUpdate ? 'updated' : 'auto'}</span>` : ''}
                         </div>
                         <span class="status-badge ${statusClass}">${statusLabel} ${hasUpdate ? '🔄' : ''}</span>
-                        <button class="btn-hapus" data-id="${item.id}" title="Hapus">
-                            <i class="fas fa-times"></i>
+                        <button class="btn-hapus" data-id="${item.id}" title="Hapus Wajah">
+                            <i class="fas fa-trash-alt"></i>
                         </button>
                     </div>
                 `;
@@ -506,7 +883,7 @@ function renderList() {
     faceListEl.querySelectorAll('.btn-hapus').forEach(btn => {
         btn.addEventListener('click', (e) => {
             const id = btn.dataset.id;
-            hapusWajah(id);
+            hapusWajahWithToken(id);
         });
     });
 }
@@ -528,29 +905,48 @@ function renderHistory() {
         return;
     }
 
-    todayHistory.slice(0, 15).forEach(item => {
-        const statusClass = item.status === 'hadir' ? 'hadir' : 'tidak';
-        const statusLabel = item.status === 'hadir' ? '✔ Hadir' : '✘ Tidak';
-        const isAuto = item.type === 'auto_check_in';
+    todayHistory.slice(0, 20).forEach(item => {
+        const statusClass = item.status === 'hadir' ? 'hadir' : 'pulang';
+        const statusLabel = item.status === 'hadir' ? '✔ Masuk' : '🚪 Pulang';
+        const isCheckIn = item.type === 'check_in' || item.type === 'auto_check_in';
+        const isCheckOut = item.type === 'check_out';
         const isUpdate = item.type === 'update_time';
         let badge = '';
-        if (isAuto) badge = ' <span class="h-auto">auto</span>';
+        if (isCheckIn) badge = ' <span class="h-auto">masuk</span>';
+        if (isCheckOut) badge = ' <span class="h-update">pulang</span>';
         if (isUpdate) badge = ' <span class="h-update">update</span>';
+        
+        const jamTampil = item.jamAbsen || item.time || '--:--';
+        const jarak = item.location && item.location.distance ? `📍${item.location.distance.toFixed(0)}m` : '';
+        
         html += `
-                    <div class="history-item">
+                    <div class="history-item" data-id="${item.id}">
                         <span class="h-name"><i class="fas fa-user"></i> ${item.name}</span>
                         <span class="h-status ${statusClass}">${statusLabel}${badge}</span>
-                        <span class="h-time"><i class="fas fa-clock"></i> ${item.time || '--:--'}</span>
+                        <span class="h-time"><i class="fas fa-clock"></i> ${jamTampil} ${jarak}</span>
+                        <button class="btn-hapus-history" data-id="${item.id}" data-name="${item.name}" title="Hapus riwayat ini">
+                            <i class="fas fa-trash-alt" style="font-size:0.6rem;color:#6a7e94;"></i>
+                        </button>
                     </div>
                 `;
     });
 
     historyList.innerHTML = html;
+
+    historyList.querySelectorAll('.btn-hapus-history').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const id = btn.dataset.id;
+            const name = btn.dataset.name;
+            hapusHistoryItem(id, name);
+        });
+    });
 }
 
 // ============================================================
-// CRUD
+// CRUD - DENGAN TOKEN
 // ============================================================
+
 async function tambahWajah(name, descriptor) {
     if (!descriptor || !descriptor.length || descriptor.length === 0) {
         showToast('❌ Gagal: Descriptor tidak valid', 'error');
@@ -584,8 +980,29 @@ async function tambahWajah(name, descriptor) {
     return id;
 }
 
-async function hapusWajah(id) {
+async function hapusWajahWithToken(id) {
     const face = STATE.registered.find(f => f.id === id);
+    if (!face) {
+        showToast('❌ Data wajah tidak ditemukan', 'error');
+        return;
+    }
+
+    const token = prompt(`⚠️ Konfirmasi Hapus "${face.name}"\n\nMasukkan Kode Akses untuk menghapus wajah ini:`);
+    
+    if (token === null) {
+        showToast('❌ Penghapusan dibatalkan', 'info');
+        return;
+    }
+    
+    if (token !== ACCESS_CODE) {
+        showToast('❌ Kode akses salah! Penghapusan dibatalkan.', 'error');
+        return;
+    }
+
+    if (!confirm(`⚠️ Yakin ingin menghapus wajah "${face.name}" dari Firebase?`)) {
+        showToast('❌ Penghapusan dibatalkan', 'info');
+        return;
+    }
 
     const deleted = await deleteFaceFromFirebase(id);
     if (!deleted) {
@@ -602,8 +1019,57 @@ async function hapusWajah(id) {
     updateLastSync();
     updateStatusBar();
 
-    showToast(`🗑️ Wajah ${face?.name || id} dihapus dari Firebase`, 'info');
+    showToast(`🗑️ Wajah "${face.name}" berhasil dihapus dari Firebase`, 'success');
     registerStatus.textContent = 'Siap mendaftar';
+}
+
+async function hapusHistoryItem(id, name) {
+    if (!id) {
+        showToast('❌ Data tidak valid', 'error');
+        return;
+    }
+
+    const token = prompt(`⚠️ Konfirmasi Hapus Riwayat "${name}"\n\nMasukkan Kode Akses untuk menghapus riwayat absensi ini:`);
+    
+    if (token === null) {
+        showToast('❌ Penghapusan dibatalkan', 'info');
+        return;
+    }
+    
+    if (token !== ACCESS_CODE) {
+        showToast('❌ Kode akses salah! Penghapusan dibatalkan.', 'error');
+        return;
+    }
+
+    if (!confirm(`⚠️ Yakin ingin menghapus riwayat absensi "${name}"?`)) {
+        showToast('❌ Penghapusan dibatalkan', 'info');
+        return;
+    }
+
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        await db.ref('attendance/' + today + '/individuals/' + id).remove();
+        
+        STATE.attendanceHistory = STATE.attendanceHistory.filter(item => item.id !== id);
+        
+        const masihAda = STATE.attendanceHistory.some(h => h.name === name && h.date === today);
+        if (!masihAda) {
+            const reg = STATE.registered.find(r => r.name === name);
+            if (reg) {
+                STATE.attendance[reg.id] = false;
+            }
+        }
+        
+        renderHistory();
+        updateAbsenCount();
+        updateStatusBar();
+        
+        showToast(`🗑️ Riwayat "${name}" berhasil dihapus`, 'success');
+        
+    } catch (error) {
+        console.error('❌ Gagal hapus riwayat:', error);
+        showToast('❌ Gagal hapus riwayat: ' + error.message, 'error');
+    }
 }
 
 async function resetSemua() {
@@ -612,7 +1078,20 @@ async function resetSemua() {
         return;
     }
 
+    const token = prompt('⚠️ KONFIRMASI RESET SEMUA DATA\n\nMasukkan Kode Akses untuk menghapus SEMUA data dari Firebase:');
+    
+    if (token === null) {
+        showToast('❌ Reset dibatalkan', 'info');
+        return;
+    }
+    
+    if (token !== ACCESS_CODE) {
+        showToast('❌ Kode akses salah! Reset dibatalkan.', 'error');
+        return;
+    }
+
     if (!confirm('⚠️ Yakin ingin menghapus SEMUA data dari Firebase? Tindakan ini tidak bisa dibatalkan!')) {
+        showToast('❌ Reset dibatalkan', 'info');
         return;
     }
 
@@ -639,6 +1118,524 @@ async function resetSemua() {
 }
 
 // ============================================================
+// PENGATURAN JAM KERJA
+// ============================================================
+
+function openJamModal() {
+    if (STATE.isJamModalOpen) return;
+    
+    STATE.isJamModalOpen = true;
+    jamModal.classList.add('show');
+    jamAccessCode.value = '';
+    jamMasukInput.value = JAM_MASUK_BATAS;
+    jamPulangInput.value = JAM_PULANG_MULAI;
+    jamStatus.textContent = 'Masukkan kode akses untuk mengubah';
+    jamStatus.style.color = '#6a7e94';
+}
+
+function closeJamModal() {
+    STATE.isJamModalOpen = false;
+    jamModal.classList.remove('show');
+}
+
+async function saveJamSettings() {
+    const code = jamAccessCode.value.trim();
+    
+    if (code !== ACCESS_CODE) {
+        jamStatus.textContent = '❌ Kode akses salah!';
+        jamStatus.style.color = '#e74c3c';
+        showToast('❌ Kode akses salah!', 'error');
+        return;
+    }
+
+    const masuk = parseInt(jamMasukInput.value);
+    const pulang = parseInt(jamPulangInput.value);
+
+    if (isNaN(masuk) || masuk < 0 || masuk > 23) {
+        jamStatus.textContent = '❌ Jam masuk harus 0-23';
+        jamStatus.style.color = '#e74c3c';
+        showToast('❌ Jam masuk harus 0-23', 'error');
+        return;
+    }
+
+    if (isNaN(pulang) || pulang < 0 || pulang > 23) {
+        jamStatus.textContent = '❌ Jam pulang harus 0-23';
+        jamStatus.style.color = '#e74c3c';
+        showToast('❌ Jam pulang harus 0-23', 'error');
+        return;
+    }
+
+    if (pulang <= masuk) {
+        jamStatus.textContent = '❌ Jam pulang harus lebih besar dari jam masuk!';
+        jamStatus.style.color = '#e74c3c';
+        showToast('❌ Jam pulang harus lebih besar dari jam masuk!', 'error');
+        return;
+    }
+
+    JAM_MASUK_BATAS = masuk;
+    JAM_PULANG_MULAI = pulang;
+    
+    updateJamDisplay();
+    closeJamModal();
+    
+    showToast(`✅ Jam kerja diperbarui: Masuk ≤ ${JAM_MASUK_BATAS}:00 | Pulang ≥ ${JAM_PULANG_MULAI}:00`, 'success');
+    console.log('✅ Pengaturan jam kerja berhasil diubah');
+}
+
+// ============================================================
+// PENGATURAN GPS - MENGGUNAKAN LEAFLET (TANPA GOOGLE MAPS API)
+// ============================================================
+
+let gpsMapInstance = null;
+let gpsMarker = null;
+let gpsCircle = null;
+let gpsGeocoder = null;
+
+function initGpsMap(lat = DEFAULT_LAT, lng = DEFAULT_LNG) {
+    if (gpsMapInstance) {
+        gpsMapInstance.setView([lat, lng], 17);
+        updateGpsMarker(lat, lng);
+        return;
+    }
+
+    // Inisialisasi Leaflet Map
+    gpsMapInstance = L.map('gpsMap', {
+        center: [lat, lng],
+        zoom: 17,
+        zoomControl: true,
+        fadeAnimation: true,
+        attributionControl: true
+    });
+
+    // Tile Layer (OpenStreetMap)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 19
+    }).addTo(gpsMapInstance);
+
+    // Geocoder untuk search
+    gpsGeocoder = L.Control.geocoder({
+        defaultMarkGeocode: false,
+        position: 'topleft',
+        placeholder: 'Cari lokasi...',
+        errorMessage: 'Lokasi tidak ditemukan'
+    }).on('markgeocode', function(e) {
+        const center = e.geocode.center;
+        const lat = center.lat;
+        const lng = center.lng;
+        gpsMapInstance.setView([lat, lng], 17);
+        updateGpsMarker(lat, lng);
+        if (gpsSearchInput) {
+            gpsSearchInput.value = e.geocode.name || '';
+        }
+    }).addTo(gpsMapInstance);
+
+    // Click on map
+    gpsMapInstance.on('click', function(e) {
+        const lat = e.latlng.lat;
+        const lng = e.latlng.lng;
+        updateGpsMarker(lat, lng);
+    });
+
+    // Tambahkan skala
+    L.control.scale({
+        position: 'bottomright',
+        metric: true,
+        imperial: false
+    }).addTo(gpsMapInstance);
+
+    // Tambahkan legend radius
+    const legend = L.control({ position: 'bottomleft' });
+    legend.onAdd = function() {
+        const div = L.DomUtil.create('div', 'info legend');
+        div.style.background = 'rgba(20, 30, 40, 0.9)';
+        div.style.color = '#eaeef2';
+        div.style.padding = '6px 12px';
+        div.style.borderRadius = '8px';
+        div.style.fontSize = '0.8rem';
+        div.style.border = '1px solid #2a323c';
+        div.innerHTML = `<span style="color:#2ecc71;">●</span> Radius ${GPS_RADIUS}m`;
+        return div;
+    };
+    legend.addTo(gpsMapInstance);
+
+    // Trigger resize setelah map siap
+    setTimeout(() => {
+        if (gpsMapInstance) {
+            gpsMapInstance.invalidateSize();
+        }
+    }, 200);
+
+    updateGpsMarker(lat, lng);
+}
+
+function updateGpsMarker(lat, lng) {
+    if (gpsMarker) {
+        gpsMarker.setLatLng([lat, lng]);
+    } else {
+        // Custom icon
+        const redIcon = L.divIcon({
+            className: 'custom-div-icon',
+            html: `<div style="background-color:#e74c3c;width:20px;height:20px;border-radius:50%;border:3px solid white;box-shadow:0 0 10px rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;position:relative;top:-10px;left:-10px;"></div>`,
+            iconSize: [20, 20],
+            iconAnchor: [10, 10]
+        });
+        
+        gpsMarker = L.marker([lat, lng], {
+            draggable: true,
+            icon: redIcon
+        }).addTo(gpsMapInstance);
+        
+        gpsMarker.on('dragend', function(e) {
+            const pos = e.target.getLatLng();
+            updateGpsInfo(pos.lat, pos.lng);
+        });
+    }
+
+    if (gpsCircle) {
+        gpsCircle.setLatLng([lat, lng]);
+    } else {
+        gpsCircle = L.circle([lat, lng], {
+            color: '#2ecc71',
+            fillColor: '#2ecc71',
+            fillOpacity: 0.15,
+            radius: GPS_RADIUS,
+            weight: 2,
+            opacity: 0.8
+        }).addTo(gpsMapInstance);
+    }
+
+    updateGpsInfo(lat, lng);
+}
+
+function updateGpsInfo(lat, lng) {
+    if (gpsLatDisplay) gpsLatDisplay.textContent = lat.toFixed(6);
+    if (gpsLngDisplay) gpsLngDisplay.textContent = lng.toFixed(6);
+    if (gpsStatusMsg) {
+        gpsStatusMsg.textContent = `📍 Titik dipilih: ${lat.toFixed(6)}, ${lng.toFixed(6)} (Radius ${GPS_RADIUS}m)`;
+        gpsStatusMsg.style.color = '#5f9ef0';
+    }
+}
+
+function openGpsModal() {
+    if (STATE.isGpsModalOpen) return;
+    
+    STATE.isGpsModalOpen = true;
+    gpsModal.classList.add('show');
+    if (gpsAccessCode) gpsAccessCode.value = '';
+    if (gpsSearchInput) gpsSearchInput.value = '';
+    
+    const defaultLat = GPS_LOCATION ? GPS_LOCATION.lat : DEFAULT_LAT;
+    const defaultLng = GPS_LOCATION ? GPS_LOCATION.lng : DEFAULT_LNG;
+    
+    if (gpsLatDisplay) gpsLatDisplay.textContent = defaultLat.toFixed(6);
+    if (gpsLngDisplay) gpsLngDisplay.textContent = defaultLng.toFixed(6);
+    if (gpsStatusMsg) {
+        gpsStatusMsg.textContent = GPS_LOCATION ? 
+            `📍 Lokasi aktif: ${GPS_LOCATION.lat.toFixed(6)}, ${GPS_LOCATION.lng.toFixed(6)} (Radius ${GPS_RADIUS}m)` :
+            'Klik peta atau cari lokasi untuk menentukan titik';
+        gpsStatusMsg.style.color = GPS_LOCATION ? '#2ecc71' : '#6a7e94';
+    }
+    
+    // Tunggu modal terbuka sebelum inisialisasi map
+    setTimeout(() => {
+        initGpsMap(defaultLat, defaultLng);
+        // Trigger resize untuk Leaflet
+        setTimeout(() => {
+            if (gpsMapInstance) {
+                gpsMapInstance.invalidateSize();
+            }
+        }, 100);
+    }, 300);
+}
+
+function closeGpsModal() {
+    STATE.isGpsModalOpen = false;
+    gpsModal.classList.remove('show');
+    
+    if (gpsMapInstance) {
+        gpsMapInstance.off();
+        gpsMapInstance.remove();
+        gpsMapInstance = null;
+        gpsMarker = null;
+        gpsCircle = null;
+        gpsGeocoder = null;
+    }
+}
+
+async function saveGpsLocation() {
+    const code = gpsAccessCode ? gpsAccessCode.value.trim() : '';
+    const statusMsg = gpsStatusMsg;
+    
+    if (code !== ACCESS_CODE) {
+        if (statusMsg) {
+            statusMsg.textContent = '❌ Kode akses salah!';
+            statusMsg.style.color = '#e74c3c';
+        }
+        showToast('❌ Kode akses salah!', 'error');
+        return;
+    }
+
+    if (!gpsMarker) {
+        if (statusMsg) {
+            statusMsg.textContent = '❌ Tentukan lokasi terlebih dahulu!';
+            statusMsg.style.color = '#e74c3c';
+        }
+        showToast('❌ Tentukan lokasi terlebih dahulu!', 'error');
+        return;
+    }
+
+    const position = gpsMarker.getLatLng();
+    const lat = position.lat;
+    const lng = position.lng;
+
+    const saved = await saveGpsToFirebase(lat, lng);
+    if (!saved) {
+        if (statusMsg) {
+            statusMsg.textContent = '❌ Gagal menyimpan lokasi!';
+            statusMsg.style.color = '#e74c3c';
+        }
+        showToast('❌ Gagal menyimpan lokasi!', 'error');
+        return;
+    }
+
+    GPS_LOCATION = { lat, lng };
+    updateGpsDisplay();
+    closeGpsModal();
+    
+    showToast(`✅ Lokasi absen diatur: ${lat.toFixed(6)}, ${lng.toFixed(6)} (Radius ${GPS_RADIUS}m)`, 'success');
+    console.log('✅ Lokasi GPS berhasil disimpan');
+}
+
+// Event listener untuk search input dengan Leaflet Geocoder
+if (gpsSearchInput) {
+    gpsSearchInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            // Trigger geocoder search
+            if (gpsGeocoder && this.value.trim()) {
+                gpsGeocoder.geocode(this.value.trim(), function(results) {
+                    if (results && results.length > 0) {
+                        const center = results[0].center;
+                        if (gpsMapInstance) {
+                            gpsMapInstance.setView([center.lat, center.lng], 17);
+                        }
+                        updateGpsMarker(center.lat, center.lng);
+                    }
+                });
+            }
+        }
+    });
+}
+
+// ============================================================
+// EXPORT EXCEL MINGGUAN
+// ============================================================
+
+function openExportModal() {
+    if (STATE.isExportModalOpen) return;
+    
+    STATE.isExportModalOpen = true;
+    exportModal.classList.add('show');
+    
+    const now = new Date();
+    if (exportYear) exportYear.value = now.getFullYear();
+    if (exportWeek) exportWeek.value = getWeekNumber(now);
+    if (exportStatus) {
+        exportStatus.textContent = 'Pilih minggu dan tahun, lalu klik Export';
+        exportStatus.style.color = '#6a7e94';
+    }
+}
+
+function closeExportModal() {
+    STATE.isExportModalOpen = false;
+    exportModal.classList.remove('show');
+}
+
+function getWeekNumber(date) {
+    const d = new Date(date);
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() + 3 - (d.getDay() + 6) % 7);
+    const week1 = new Date(d.getFullYear(), 0, 4);
+    return 1 + Math.round(((d - week1) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
+}
+
+function getDateRangeOfWeek(week, year) {
+    const d = new Date(year, 0, 1);
+    const dayOffset = (d.getDay() + 6) % 7;
+    d.setDate(d.getDate() - dayOffset + (week - 1) * 7);
+    const start = new Date(d);
+    const end = new Date(d);
+    end.setDate(end.getDate() + 6);
+    return { start, end };
+}
+
+async function exportExcel() {
+    const week = parseInt(exportWeek ? exportWeek.value : 0);
+    const year = parseInt(exportYear ? exportYear.value : 0);
+    
+    if (isNaN(week) || week < 1 || week > 53) {
+        if (exportStatus) {
+            exportStatus.textContent = '❌ Minggu harus 1-53';
+            exportStatus.style.color = '#e74c3c';
+        }
+        showToast('❌ Minggu harus 1-53', 'error');
+        return;
+    }
+    
+    if (isNaN(year) || year < 2020 || year > 2030) {
+        if (exportStatus) {
+            exportStatus.textContent = '❌ Tahun harus 2020-2030';
+            exportStatus.style.color = '#e74c3c';
+        }
+        showToast('❌ Tahun harus 2020-2030', 'error');
+        return;
+    }
+
+    if (exportStatus) {
+        exportStatus.textContent = '⏳ Mengambil data...';
+        exportStatus.style.color = '#f39c12';
+    }
+    if (doExportBtn) doExportBtn.disabled = true;
+
+    try {
+        const { start, end } = getDateRangeOfWeek(week, year);
+        const startStr = start.toISOString().split('T')[0];
+        const endStr = end.toISOString().split('T')[0];
+        
+        console.log(`📊 Export minggu ${week} tahun ${year}: ${startStr} - ${endStr}`);
+        
+        const snapshot = await db.ref('attendance').once('value');
+        const data = snapshot.val();
+        
+        if (!data) {
+            if (exportStatus) {
+                exportStatus.textContent = '❌ Tidak ada data absensi';
+                exportStatus.style.color = '#e74c3c';
+            }
+            showToast('❌ Tidak ada data absensi', 'error');
+            if (doExportBtn) doExportBtn.disabled = false;
+            return;
+        }
+
+        const allHistory = [];
+        
+        Object.keys(data).forEach(dateKey => {
+            if (dateKey >= startStr && dateKey <= endStr) {
+                const dayData = data[dateKey];
+                if (dayData && dayData.individuals) {
+                    Object.keys(dayData.individuals).forEach(id => {
+                        const item = dayData.individuals[id];
+                        if (item.name && item.status) {
+                            allHistory.push({
+                                tanggal: dateKey,
+                                nama: item.name,
+                                status: item.status === 'hadir' ? 'Masuk' : 'Pulang',
+                                waktu: item.jamAbsen || item.time || '--:--',
+                                type: item.type || 'check_in',
+                                jarak: item.location && item.location.distance ? 
+                                    item.location.distance.toFixed(1) + 'm' : '-'
+                            });
+                        }
+                    });
+                }
+            }
+        });
+
+        if (allHistory.length === 0) {
+            if (exportStatus) {
+                exportStatus.textContent = `❌ Tidak ada data untuk minggu ${week} tahun ${year}`;
+                exportStatus.style.color = '#e74c3c';
+            }
+            showToast(`❌ Tidak ada data untuk minggu ${week} tahun ${year}`, 'error');
+            if (doExportBtn) doExportBtn.disabled = false;
+            return;
+        }
+
+        allHistory.sort((a, b) => a.tanggal.localeCompare(b.tanggal));
+
+        const wb = XLSX.utils.book_new();
+        
+        const excelData = [
+            ['LAPORAN ABSENSI MINGGUAN'],
+            [`Minggu ke-${week} Tahun ${year}`],
+            [`Periode: ${startStr} - ${endStr}`],
+            [`Radius Absen: ${GPS_RADIUS} meter dari titik lokasi`],
+            GPS_LOCATION ? [`Titik Lokasi: ${GPS_LOCATION.lat.toFixed(6)}, ${GPS_LOCATION.lng.toFixed(6)}`] : ['Titik Lokasi: Belum diatur'],
+            [],
+            ['No', 'Tanggal', 'Nama', 'Status', 'Waktu', 'Jarak dari Titik']
+        ];
+
+        allHistory.forEach((item, index) => {
+            const dateFormatted = new Date(item.tanggal + 'T00:00:00').toLocaleDateString('id-ID', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric'
+            });
+            excelData.push([
+                index + 1,
+                dateFormatted,
+                item.nama,
+                item.status,
+                item.waktu,
+                item.jarak
+            ]);
+        });
+
+        excelData.push([]);
+        excelData.push(['Total Data:', allHistory.length]);
+        
+        const masukCount = allHistory.filter(h => h.status === 'Masuk').length;
+        const pulangCount = allHistory.filter(h => h.status === 'Pulang').length;
+        excelData.push(['Total Masuk:', masukCount]);
+        excelData.push(['Total Pulang:', pulangCount]);
+
+        const ws = XLSX.utils.aoa_to_sheet(excelData);
+        
+        ws['!cols'] = [
+            { wch: 5 },
+            { wch: 15 },
+            { wch: 20 },
+            { wch: 12 },
+            { wch: 12 },
+            { wch: 15 }
+        ];
+
+        ws['!merges'] = [
+            { s: { r: 0, c: 0 }, e: { r: 0, c: 5 } },
+            { s: { r: 1, c: 0 }, e: { r: 1, c: 5 } },
+            { s: { r: 2, c: 0 }, e: { r: 2, c: 5 } },
+            { s: { r: 3, c: 0 }, e: { r: 3, c: 5 } },
+            { s: { r: 4, c: 0 }, e: { r: 4, c: 5 } }
+        ];
+
+        XLSX.utils.book_append_sheet(wb, ws, 'Absensi');
+        
+        const fileName = `Absensi_Minggu_${week}_${year}.xlsx`;
+        XLSX.writeFile(wb, fileName);
+        
+        if (exportStatus) {
+            exportStatus.textContent = `✅ Berhasil export ${allHistory.length} data!`;
+            exportStatus.style.color = '#2ecc71';
+        }
+        showToast(`✅ Berhasil export ${allHistory.length} data ke Excel!`, 'success');
+        
+        setTimeout(() => {
+            closeExportModal();
+        }, 1500);
+        
+    } catch (error) {
+        console.error('❌ Gagal export:', error);
+        if (exportStatus) {
+            exportStatus.textContent = '❌ Gagal export: ' + error.message;
+            exportStatus.style.color = '#e74c3c';
+        }
+        showToast('❌ Gagal export: ' + error.message, 'error');
+    }
+    
+    if (doExportBtn) doExportBtn.disabled = false;
+}
+
+// ============================================================
 // CANVAS
 // ============================================================
 function resizeCanvas() {
@@ -650,58 +1647,84 @@ function resizeCanvas() {
     overlay.style.height = '100%';
 }
 
+function resizePreviewCanvas() {
+    const w = previewVideo.videoWidth || previewVideo.clientWidth || 320;
+    const h = previewVideo.videoHeight || previewVideo.clientHeight || 240;
+    previewOverlay.width = w;
+    previewOverlay.height = h;
+    previewOverlay.style.width = '100%';
+    previewOverlay.style.height = '100%';
+}
+
 // ============================================================
 // LOAD ALL MODELS
 // ============================================================
 async function loadAllModels() {
-    const MODEL_URLS = [
-        'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights',
-        'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights'
-    ];
-
-    let lastError = null;
-
-    for (const MODEL_URL of MODEL_URLS) {
-        try {
-            console.log(`Mencoba load model dari: ${MODEL_URL}`);
-            modelStatus.innerHTML = `<i class="fas fa-spinner fa-pulse"></i> Mencoba: ${MODEL_URL.split('/').pop()}...`;
-            modelStatus.className = 'info-badge warning';
-
-            await Promise.all([
-                faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-                faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-                faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
-            ]);
-
-            STATE.modelsLoaded.tinyFaceDetector = true;
-            STATE.modelsLoaded.faceLandmark68 = true;
-            STATE.modelsLoaded.faceRecognition = true;
-            STATE.modelLoaded = true;
-
-            console.log(`✅ Semua model berhasil dimuat dari: ${MODEL_URL}`);
-            updateModelStatus();
-            showToast('✅ Model berhasil dimuat!', 'success');
-            return true;
-
-        } catch (err) {
-            console.warn(`Gagal load dari ${MODEL_URL}:`, err.message);
-            lastError = err;
-            STATE.modelsLoaded.tinyFaceDetector = false;
-            STATE.modelsLoaded.faceLandmark68 = false;
-            STATE.modelsLoaded.faceRecognition = false;
-            STATE.modelLoaded = false;
-        }
+    if (STATE.modelLoaded) {
+        return true;
     }
+    
+    if (STATE.modelLoadingPromise) {
+        return await STATE.modelLoadingPromise;
+    }
+    
+    STATE.modelLoadingPromise = new Promise(async (resolve) => {
+        const MODEL_URLS = [
+            'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights',
+            'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights'
+        ];
 
-    console.error('❌ Semua percobaan load model gagal:', lastError);
-    modelStatus.innerHTML = '<i class="fas fa-times-circle"></i> Gagal load model';
-    modelStatus.className = 'info-badge error';
-    showToast('❌ Gagal memuat model. Periksa koneksi internet.', 'error');
-    return false;
+        let lastError = null;
+
+        for (const MODEL_URL of MODEL_URLS) {
+            try {
+                console.log(`📥 Mencoba load model dari: ${MODEL_URL}`);
+                modelStatus.innerHTML = `<i class="fas fa-spinner fa-pulse"></i> Memuat model...`;
+                modelStatus.className = 'info-badge warning';
+
+                await Promise.all([
+                    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+                    faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+                    faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+                ]);
+
+                STATE.modelsLoaded.tinyFaceDetector = true;
+                STATE.modelsLoaded.faceLandmark68 = true;
+                STATE.modelsLoaded.faceRecognition = true;
+                STATE.modelLoaded = true;
+
+                console.log(`✅ Semua model berhasil dimuat dari: ${MODEL_URL}`);
+                updateModelStatus();
+                showToast('✅ Model AI berhasil dimuat!', 'success');
+                
+                STATE.modelLoadingPromise = null;
+                resolve(true);
+                return;
+
+            } catch (err) {
+                console.warn(`⚠️ Gagal load dari ${MODEL_URL}:`, err.message);
+                lastError = err;
+                STATE.modelsLoaded.tinyFaceDetector = false;
+                STATE.modelsLoaded.faceLandmark68 = false;
+                STATE.modelsLoaded.faceRecognition = false;
+                STATE.modelLoaded = false;
+            }
+        }
+
+        console.error('❌ Semua percobaan load model gagal:', lastError);
+        modelStatus.innerHTML = '<i class="fas fa-times-circle"></i> Gagal load model';
+        modelStatus.className = 'info-badge error';
+        showToast('❌ Gagal memuat model. Periksa koneksi internet.', 'error');
+        
+        STATE.modelLoadingPromise = null;
+        resolve(false);
+    });
+    
+    return await STATE.modelLoadingPromise;
 }
 
 // ============================================================
-// DETECTION LOOP WITH AUTO ABSEN
+// DETECTION LOOP
 // ============================================================
 let lastDetectionTime = 0;
 const DETECTION_INTERVAL = 150;
@@ -856,14 +1879,12 @@ async function detectLoop(timestamp) {
 }
 
 // ============================================================
-// START / STOP
+// START / STOP / CAMERA ONLY
 // ============================================================
-async function startDetection() {
+
+async function startCameraOnly() {
     if (STATE.isDetecting) return;
-
-    startBtn.disabled = true;
-    setStatus(false, 'mengakses kamera...', true);
-
+    
     try {
         STATE.stream = await navigator.mediaDevices.getUserMedia({
             video: {
@@ -875,12 +1896,78 @@ async function startDetection() {
         video.srcObject = STATE.stream;
         await video.play();
         placeholderCam.style.display = 'none';
-
+        
         await new Promise(resolve => {
             if (video.videoWidth > 0) resolve();
             else video.addEventListener('loadedmetadata', resolve, { once: true });
         });
         resizeCanvas();
+        
+        setStatus(false, 'kamera aktif - siap daftar');
+        detectionInfo.innerHTML = '<i class="fas fa-camera"></i> Kamera aktif, silakan daftar wajah';
+        detectionInfo.className = 'info-badge success';
+        
+        console.log('📷 Kamera aktif (mode registrasi)');
+        showToast('📷 Kamera aktif - siap registrasi wajah', 'info');
+        
+    } catch (err) {
+        console.error('Gagal akses kamera:', err);
+        let msg = 'Gagal akses kamera.';
+        if (err.name === 'NotAllowedError') msg += ' Izin kamera ditolak.';
+        else if (err.name === 'NotFoundError') msg += ' Kamera tidak ditemukan.';
+        showToast(msg, 'error');
+    }
+}
+
+async function autoStartDetection() {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    if (STATE.isInitialized && STATE.registered.length > 0) {
+        console.log('🚀 Auto-starting detection...');
+        await startDetection();
+    } else if (STATE.isInitialized && STATE.registered.length === 0) {
+        console.log('⚠️ Belum ada wajah terdaftar, tidak auto-start');
+        await startCameraOnly();
+    } else {
+        console.log('⏳ Menunggu inisialisasi selesai...');
+        const checkInit = setInterval(async () => {
+            if (STATE.isInitialized) {
+                clearInterval(checkInit);
+                if (STATE.registered.length > 0) {
+                    await startDetection();
+                } else {
+                    await startCameraOnly();
+                }
+            }
+        }, 500);
+    }
+}
+
+async function startDetection() {
+    if (STATE.isDetecting) return;
+
+    startBtn.disabled = true;
+    setStatus(false, 'mengakses kamera...', true);
+
+    try {
+        if (!STATE.stream) {
+            STATE.stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    facingMode: 'user',
+                    width: { ideal: 640 },
+                    height: { ideal: 480 }
+                }
+            });
+            video.srcObject = STATE.stream;
+            await video.play();
+            placeholderCam.style.display = 'none';
+
+            await new Promise(resolve => {
+                if (video.videoWidth > 0) resolve();
+                else video.addEventListener('loadedmetadata', resolve, { once: true });
+            });
+            resizeCanvas();
+        }
 
         if (!STATE.modelLoaded) {
             const success = await loadAllModels();
@@ -899,6 +1986,8 @@ async function startDetection() {
 
         lastDetectionTime = 0;
         requestAnimationFrame(detectLoop);
+        
+        showToast('✅ Deteksi wajah aktif!', 'success');
 
     } catch (err) {
         console.error('Start error:', err);
@@ -943,13 +2032,239 @@ function stopDetection() {
 }
 
 // ============================================================
-// REGISTER WITH ACCESS CODE
+// MODAL REGISTRASI
+// ============================================================
+
+async function openRegisterModal() {
+    if (STATE.isModalOpen) return;
+    
+    const code = prompt('Masukkan Kode Akses untuk Registrasi:');
+    if (code === null) return;
+    
+    if (code !== ACCESS_CODE) {
+        showToast('❌ Kode akses salah!', 'error');
+        return;
+    }
+    
+    STATE.isModalOpen = true;
+    registerModal.classList.add('show');
+    registerStatus.textContent = 'Siap mendaftar';
+    registerName.value = '';
+    accessCode.value = '';
+    previewInfo.innerHTML = '<i class="fas fa-spinner fa-pulse"></i> Menyiapkan kamera...';
+    previewInfo.className = 'preview-info warning';
+    
+    if (STATE.isDetecting) {
+        stopDetection();
+    }
+    
+    if (!STATE.modelLoaded) {
+        previewInfo.innerHTML = '<i class="fas fa-spinner fa-pulse"></i> Memuat model AI...';
+        previewInfo.className = 'preview-info warning';
+        await loadAllModels();
+    }
+    
+    try {
+        if (STATE.previewStream) {
+            STATE.previewStream.getTracks().forEach(t => t.stop());
+        }
+        
+        STATE.previewStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: 'user',
+                width: { ideal: 320 },
+                height: { ideal: 240 }
+            }
+        });
+        previewVideo.srcObject = STATE.previewStream;
+        await previewVideo.play();
+        previewPlaceholder.style.display = 'none';
+        
+        await new Promise(resolve => {
+            if (previewVideo.videoWidth > 0) {
+                resolve();
+            } else {
+                previewVideo.addEventListener('loadedmetadata', resolve, { once: true });
+            }
+        });
+        resizePreviewCanvas();
+        
+        setTimeout(() => {
+            startPreviewDetection();
+        }, 300);
+        
+        previewInfo.innerHTML = '<i class="fas fa-spinner fa-pulse"></i> Mendeteksi wajah...';
+        previewInfo.className = 'preview-info active';
+        
+        console.log('📷 Preview kamera aktif, width:', previewVideo.videoWidth, 'height:', previewVideo.videoHeight);
+        
+    } catch (err) {
+        console.error('❌ Gagal buka kamera preview:', err);
+        showToast('❌ Gagal buka kamera preview: ' + err.message, 'error');
+        previewInfo.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Gagal buka kamera';
+        previewInfo.className = 'preview-info error';
+    }
+}
+
+function closeRegisterModal() {
+    STATE.isModalOpen = false;
+    registerModal.classList.remove('show');
+    
+    stopPreviewDetection();
+    
+    if (STATE.previewStream) {
+        STATE.previewStream.getTracks().forEach(t => t.stop());
+        STATE.previewStream = null;
+    }
+    previewVideo.srcObject = null;
+    previewPlaceholder.style.display = 'flex';
+    previewInfo.innerHTML = '<i class="fas fa-eye"></i> Menunggu wajah...';
+    previewInfo.className = 'preview-info';
+    previewCtx.clearRect(0, 0, previewOverlay.width, previewOverlay.height);
+    
+    if (STATE.registered.length > 0) {
+        startDetection();
+    } else {
+        startCameraOnly();
+    }
+}
+
+// ============================================================
+// PREVIEW DETECTION
+// ============================================================
+let previewDetectInterval = null;
+let previewRetryCount = 0;
+const MAX_PREVIEW_RETRY = 10;
+
+function startPreviewDetection() {
+    if (previewDetectInterval) {
+        clearInterval(previewDetectInterval);
+        previewDetectInterval = null;
+    }
+    
+    previewRetryCount = 0;
+    
+    previewDetectInterval = setInterval(async () => {
+        if (!STATE.isModalOpen) {
+            return;
+        }
+        
+        if (!previewVideo.videoWidth || !previewVideo.videoHeight) {
+            previewInfo.innerHTML = '<i class="fas fa-spinner fa-pulse"></i> Menunggu kamera...';
+            previewInfo.className = 'preview-info warning';
+            return;
+        }
+        
+        if (!STATE.modelLoaded) {
+            previewInfo.innerHTML = '<i class="fas fa-spinner fa-pulse"></i> Memuat model AI...';
+            previewInfo.className = 'preview-info warning';
+            
+            const success = await loadAllModels();
+            if (!success) {
+                previewRetryCount++;
+                if (previewRetryCount > MAX_PREVIEW_RETRY) {
+                    previewInfo.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Gagal memuat model. Refresh halaman.';
+                    previewInfo.className = 'preview-info error';
+                }
+                return;
+            }
+            return;
+        }
+        
+        previewRetryCount = 0;
+        
+        try {
+            const detections = await faceapi.detectAllFaces(
+                previewVideo,
+                new faceapi.TinyFaceDetectorOptions({
+                    inputSize: 224,
+                    scoreThreshold: 0.4
+                })
+            ).withFaceLandmarks().withFaceDescriptors();
+            
+            const w = previewOverlay.width;
+            const h = previewOverlay.height;
+            previewCtx.clearRect(0, 0, w, h);
+            
+            if (!detections || detections.length === 0) {
+                previewInfo.innerHTML = '<i class="fas fa-eye-slash"></i> Tidak ada wajah';
+                previewInfo.className = 'preview-info warning';
+                return;
+            }
+            
+            if (detections.length > 1) {
+                previewInfo.innerHTML = `<i class="fas fa-exclamation-triangle"></i> ${detections.length} wajah - hanya 1 yang boleh`;
+                previewInfo.className = 'preview-info error';
+            } else {
+                previewInfo.innerHTML = '<i class="fas fa-check-circle"></i> 1 wajah terdeteksi ✅';
+                previewInfo.className = 'preview-info success';
+            }
+            
+            detections.forEach(det => {
+                const box = det.detection.box;
+                const x = box.x,
+                    y = box.y,
+                    width = box.width,
+                    height = box.height;
+                
+                const isSingle = detections.length === 1;
+                previewCtx.strokeStyle = isSingle ? '#2ecc71' : '#e74c3c';
+                previewCtx.lineWidth = 3;
+                previewCtx.shadowColor = isSingle ? '#2ecc7155' : '#e74c3c55';
+                previewCtx.shadowBlur = 12;
+                previewCtx.strokeRect(x, y, width, height);
+                
+                previewCtx.shadowBlur = 0;
+                previewCtx.lineWidth = 2;
+                const cs = Math.min(10, width / 8);
+                
+                previewCtx.beginPath();
+                previewCtx.moveTo(x, y + cs);
+                previewCtx.lineTo(x, y);
+                previewCtx.lineTo(x + cs, y);
+                previewCtx.stroke();
+                
+                previewCtx.beginPath();
+                previewCtx.moveTo(x + width - cs, y);
+                previewCtx.lineTo(x + width, y);
+                previewCtx.lineTo(x + width, y + cs);
+                previewCtx.stroke();
+                
+                previewCtx.beginPath();
+                previewCtx.moveTo(x, y + height - cs);
+                previewCtx.lineTo(x, y + height);
+                previewCtx.lineTo(x + cs, y + height);
+                previewCtx.stroke();
+                
+                previewCtx.beginPath();
+                previewCtx.moveTo(x + width - cs, y + height);
+                previewCtx.lineTo(x + width, y + height);
+                previewCtx.lineTo(x + width, y + height - cs);
+                previewCtx.stroke();
+            });
+            
+        } catch (err) {
+            console.error('❌ Preview detection error:', err);
+            previewInfo.innerHTML = `<i class="fas fa-exclamation-triangle"></i> Error: ${err.message || 'deteksi gagal'}`;
+            previewInfo.className = 'preview-info error';
+        }
+    }, 300);
+}
+
+function stopPreviewDetection() {
+    if (previewDetectInterval) {
+        clearInterval(previewDetectInterval);
+        previewDetectInterval = null;
+    }
+}
+
+// ============================================================
+// REGISTER FACE FROM MODAL
 // ============================================================
 async function registerFace() {
     const name = registerName.value.trim();
     const code = accessCode.value.trim();
 
-    // Validasi nama
     if (!name) {
         showToast('Masukkan nama terlebih dahulu', 'error');
         registerStatus.textContent = '⚠️ Masukkan nama!';
@@ -957,7 +2272,6 @@ async function registerFace() {
         return;
     }
 
-    // Validasi kode akses
     if (!code) {
         showToast('Masukkan kode akses!', 'error');
         registerStatus.textContent = '⚠️ Masukkan kode akses!';
@@ -965,7 +2279,6 @@ async function registerFace() {
         return;
     }
 
-    // Cek kode akses
     if (code !== ACCESS_CODE) {
         showToast('❌ Kode akses salah!', 'error');
         registerStatus.textContent = '❌ Kode akses salah!';
@@ -974,9 +2287,9 @@ async function registerFace() {
         return;
     }
 
-    if (!STATE.isDetecting || !video.videoWidth) {
-        showToast('Aktifkan deteksi terlebih dahulu', 'error');
-        registerStatus.textContent = '⚠️ Aktifkan deteksi dulu!';
+    if (!previewVideo.videoWidth || !STATE.previewStream) {
+        showToast('Kamera preview tidak aktif', 'error');
+        registerStatus.textContent = '⚠️ Kamera tidak aktif!';
         return;
     }
 
@@ -991,8 +2304,15 @@ async function registerFace() {
     showToast('⏳ Mendeteksi wajah...', 'info');
 
     try {
+        if (!STATE.modelLoaded) {
+            await loadAllModels();
+            if (!STATE.modelLoaded) {
+                throw new Error('Model gagal dimuat');
+            }
+        }
+        
         const detections = await faceapi.detectAllFaces(
-            video,
+            previewVideo,
             new faceapi.TinyFaceDetectorOptions({
                 inputSize: 224,
                 scoreThreshold: 0.4
@@ -1029,7 +2349,6 @@ async function registerFace() {
 
         console.log('Descriptor length:', descriptor.length);
 
-        // Cek duplikat
         let duplicate = false;
         let duplicateName = '';
         for (const reg of STATE.registered) {
@@ -1058,10 +2377,13 @@ async function registerFace() {
 
         const id = await tambahWajah(name, descriptor);
         if (id) {
-            registerName.value = '';
-            accessCode.value = '';
             registerStatus.textContent = `✅ "${name}" terdaftar di Firebase!`;
             showToast(`✅ "${name}" berhasil didaftarkan!`, 'success');
+            registerName.value = '';
+            accessCode.value = '';
+            setTimeout(() => {
+                closeRegisterModal();
+            }, 1500);
         } else {
             registerStatus.textContent = '❌ Gagal menyimpan ke Firebase!';
         }
@@ -1087,6 +2409,7 @@ async function initApp() {
 
         await loadFacesFromFirebase();
         await loadHistoryFromFirebase();
+        await loadGpsFromFirebase();
 
         STATE.lastSync = Date.now();
         updateLastSync();
@@ -1098,9 +2421,20 @@ async function initApp() {
         updateModelStatus();
         updateAbsenCount();
         updateStatusBar();
+        updateJamDisplay();
+        updateGpsDisplay();
 
         console.log('👽 Face Attendance dengan Auto Absen & Update Time siap!');
         console.log('Data wajah:', STATE.registered.length, 'orang');
+        console.log('📋 Jam Masuk Batas:', JAM_MASUK_BATAS + ':00');
+        console.log('📋 Jam Pulang Mulai:', JAM_PULANG_MULAI + ':00');
+        console.log('📍 Lokasi Absen (Sidoarjo):', GPS_LOCATION ? `${GPS_LOCATION.lat}, ${GPS_LOCATION.lng}` : 'Belum diatur');
+
+        if (!STATE.modelLoaded) {
+            loadAllModels();
+        }
+
+        await autoStartDetection();
 
     } catch (error) {
         console.error('❌ Gagal inisialisasi:', error);
@@ -1117,19 +2451,100 @@ startBtn.addEventListener('click', startDetection);
 stopBtn.addEventListener('click', stopDetection);
 resetBtn.addEventListener('click', resetSemua);
 syncBtn.addEventListener('click', syncFacesToFirebase);
+
+// Registrasi
+showRegisterBtn.addEventListener('click', openRegisterModal);
+closeModalBtn.addEventListener('click', closeRegisterModal);
+cancelRegisterBtn.addEventListener('click', closeRegisterModal);
 registerBtn.addEventListener('click', registerFace);
 
-// Enter key pada input nama
+registerModal.addEventListener('click', (e) => {
+    if (e.target === registerModal) {
+        closeRegisterModal();
+    }
+});
+
 registerName.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
         accessCode.focus();
     }
 });
 
-// Enter key pada input kode akses
 accessCode.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
         registerFace();
+    }
+});
+
+// Pengaturan Jam
+jamInfoBadge.addEventListener('click', openJamModal);
+closeJamBtn.addEventListener('click', closeJamModal);
+cancelJamBtn.addEventListener('click', closeJamModal);
+saveJamBtn.addEventListener('click', saveJamSettings);
+
+jamModal.addEventListener('click', (e) => {
+    if (e.target === jamModal) {
+        closeJamModal();
+    }
+});
+
+jamAccessCode.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        jamMasukInput.focus();
+    }
+});
+
+jamMasukInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        jamPulangInput.focus();
+    }
+});
+
+jamPulangInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        saveJamSettings();
+    }
+});
+
+// GPS - Leaflet
+gpsBadge.addEventListener('click', openGpsModal);
+closeGpsBtn.addEventListener('click', closeGpsModal);
+cancelGpsBtn.addEventListener('click', closeGpsModal);
+saveGpsBtn.addEventListener('click', saveGpsLocation);
+
+gpsModal.addEventListener('click', (e) => {
+    if (e.target === gpsModal) {
+        closeGpsModal();
+    }
+});
+
+gpsAccessCode.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        if (gpsSearchInput) gpsSearchInput.focus();
+    }
+});
+
+// Export Excel
+exportExcelBtn.addEventListener('click', openExportModal);
+closeExportBtn.addEventListener('click', closeExportModal);
+cancelExportBtn.addEventListener('click', closeExportModal);
+doExportBtn.addEventListener('click', exportExcel);
+
+exportModal.addEventListener('click', (e) => {
+    if (e.target === exportModal) {
+        closeExportModal();
+    }
+});
+
+exportWeek.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        if (exportYear) exportYear.focus();
+    }
+});
+
+exportYear.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        if (doExportBtn) doExportBtn.click();
     }
 });
 
@@ -1140,8 +2555,11 @@ initApp();
 
 window.addEventListener('resize', () => {
     if (video.videoWidth > 0) resizeCanvas();
+    if (previewVideo.videoWidth > 0) resizePreviewCanvas();
 });
 
 window.addEventListener('beforeunload', () => {
     if (STATE.stream) STATE.stream.getTracks().forEach(t => t.stop());
+    if (STATE.previewStream) STATE.previewStream.getTracks().forEach(t => t.stop());
+    if (previewDetectInterval) clearInterval(previewDetectInterval);
 });

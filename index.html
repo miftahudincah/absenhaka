@@ -6,6 +6,9 @@
     <title>Face Attendance · Auto Absen</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
     <link rel="stylesheet" href="style.css" />
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
 </head>
 <body>
 
@@ -13,11 +16,17 @@
         <!-- HEADER -->
         <div class="header">
             <h1><i class="fas fa-user-check"></i> Face Attendance</h1>
-            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
                 <span class="badge-firebase"><i class="fas fa-fire"></i> Firebase</span>
                 <span class="badge-rtdb"><i class="fas fa-database"></i> Realtime DB</span>
                 <span class="badge-auto"><i class="fas fa-magic"></i> Auto Absen</span>
                 <span class="badge-update"><i class="fas fa-sync-alt"></i> Update Time</span>
+                <span class="badge-gps" id="gpsBadge" style="background:#1a2a2a;border-color:#f39c12;color:#f39c12;padding:0.3rem 1rem;border-radius:40px;font-size:0.8rem;border:1px solid;cursor:pointer;" title="Klik untuk atur lokasi">
+                    <i class="fas fa-map-marker-alt"></i> <span id="gpsStatus">Lokasi: Belum</span>
+                </span>
+                <span class="badge-jam" id="jamInfoBadge" style="background:#1a2a2a;border-color:#2ecc71;color:#2ecc71;padding:0.3rem 1rem;border-radius:40px;font-size:0.8rem;border:1px solid;cursor:pointer;" title="Klik untuk ubah jam kerja">
+                    <i class="fas fa-clock"></i> Masuk ≤ <span id="jamMasukDisplay">10</span>:00 | Pulang ≥ <span id="jamPulangDisplay">15</span>:00
+                </span>
                 <span class="badge"><i class="fas fa-moon"></i> dark</span>
             </div>
         </div>
@@ -71,30 +80,36 @@
                 </div>
             </div>
 
-            <!-- FACE LIST -->
-            <div class="face-list-panel">
+            <!-- FACE LIST & ABSENSI PANEL -->
+            <div class="face-list-panel" id="absenPanel">
                 <h3>
-                    <i class="fas fa-users"></i> Daftar Wajah
+                    <i class="fas fa-users"></i> Daftar Wajah & Absensi
                     <span id="totalCount">0</span>
                 </h3>
                 <div class="face-list" id="faceList">
                     <div class="empty-list"><span class="spinner"></span> Memuat data dari Firebase...</div>
                 </div>
-                <div class="register-row">
-                    <input type="text" id="registerName" placeholder="Nama wajah baru..." />
-                    <input type="password" id="accessCode" placeholder="Kode akses..." style="max-width:120px;" />
-                    <button class="btn btn-success" id="registerBtn">
-                        <i class="fas fa-plus-circle"></i> Daftar
-                    </button>
-                </div>
-                <div class="register-status" id="registerStatus">Siap mendaftar</div>
 
                 <!-- ATTENDANCE HISTORY -->
                 <div class="history-section">
-                    <h4><i class="fas fa-clock"></i> Riwayat Absensi Hari Ini</h4>
+                    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.3rem;">
+                        <h4 style="margin:0;"><i class="fas fa-clock"></i> Riwayat Absensi Hari Ini</h4>
+                        <div style="display:flex;gap:0.3rem;flex-wrap:wrap;">
+                            <button class="btn btn-sm btn-export" id="exportExcelBtn" style="font-size:0.65rem;padding:0.2rem 0.6rem;">
+                                <i class="fas fa-file-excel"></i> Export Excel
+                            </button>
+                        </div>
+                    </div>
                     <div class="history-list" id="historyList">
                         <div style="color: #4a5a6a; text-align: center; font-size: 0.8rem; padding: 0.5rem;">Belum ada absensi</div>
                     </div>
+                </div>
+
+                <!-- BUTTON BUKA REGISTRASI -->
+                <div class="register-toggle">
+                    <button class="btn btn-register-toggle" id="showRegisterBtn">
+                        <i class="fas fa-user-plus"></i> Buka Registrasi Wajah
+                    </button>
                 </div>
             </div>
         </div>
@@ -133,6 +148,198 @@
         </div>
     </div>
 
+    <!-- ============================================================
+    MODAL REGISTRASI
+    ============================================================ -->
+    <div class="modal-overlay" id="registerModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-user-plus"></i> Registrasi Wajah Baru</h2>
+                <button class="modal-close" id="closeRegisterModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="register-info">
+                    <p><i class="fas fa-info-circle"></i> Pastikan wajah terlihat jelas di kamera dan hanya 1 wajah dalam frame.</p>
+                </div>
+
+                <div class="register-form">
+                    <div class="form-group">
+                        <label><i class="fas fa-user"></i> Nama Lengkap</label>
+                        <input type="text" id="registerName" placeholder="Masukkan nama..." />
+                    </div>
+                    <div class="form-group">
+                        <label><i class="fas fa-key"></i> Kode Akses</label>
+                        <input type="password" id="accessCode" placeholder="Masukkan kode akses..." />
+                    </div>
+                    <div class="form-group" style="grid-column: 1 / -1;">
+                        <label><i class="fas fa-camera"></i> Status</label>
+                        <div class="register-status" id="registerStatus">Siap mendaftar</div>
+                    </div>
+                </div>
+
+                <div class="register-preview">
+                    <div class="preview-box">
+                        <video id="previewVideo" autoplay muted playsinline></video>
+                        <canvas id="previewOverlay"></canvas>
+                        <div class="preview-placeholder" id="previewPlaceholder">
+                            <i class="fas fa-user-circle"></i>
+                            <span>Wajah akan muncul di sini</span>
+                        </div>
+                    </div>
+                    <div class="preview-info" id="previewInfo">
+                        <i class="fas fa-eye"></i> Menunggu wajah...
+                    </div>
+                </div>
+
+                <div class="register-actions">
+                    <button class="btn btn-danger" id="cancelRegisterBtn">
+                        <i class="fas fa-times"></i> Batal
+                    </button>
+                    <button class="btn btn-success" id="registerBtn">
+                        <i class="fas fa-save"></i> Daftarkan Wajah
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+    MODAL PENGATURAN JAM KERJA
+    ============================================================ -->
+    <div class="modal-overlay" id="jamModal">
+        <div class="modal-content" style="max-width:450px;">
+            <div class="modal-header">
+                <h2><i class="fas fa-clock"></i> Pengaturan Jam Kerja</h2>
+                <button class="modal-close" id="closeJamModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="register-info" style="margin-bottom:0.5rem;">
+                    <p><i class="fas fa-info-circle"></i> Masukkan kode akses untuk mengubah jam kerja.</p>
+                </div>
+
+                <div class="register-form" style="grid-template-columns:1fr;">
+                    <div class="form-group">
+                        <label><i class="fas fa-key"></i> Kode Akses</label>
+                        <input type="password" id="jamAccessCode" placeholder="Masukkan kode akses..." />
+                    </div>
+                    <div class="form-group">
+                        <label><i class="fas fa-sign-in-alt"></i> Batas Jam Masuk (0-23)</label>
+                        <input type="number" id="jamMasukInput" min="0" max="23" placeholder="Contoh: 10" />
+                    </div>
+                    <div class="form-group">
+                        <label><i class="fas fa-sign-out-alt"></i> Jam Mulai Pulang (0-23)</label>
+                        <input type="number" id="jamPulangInput" min="0" max="23" placeholder="Contoh: 15" />
+                    </div>
+                    <div class="form-group" style="grid-column:1/-1;">
+                        <label><i class="fas fa-info-circle"></i> Status</label>
+                        <div class="register-status" id="jamStatus">Masukkan kode akses untuk mengubah</div>
+                    </div>
+                </div>
+
+                <div class="register-actions">
+                    <button class="btn btn-danger" id="cancelJamBtn">
+                        <i class="fas fa-times"></i> Batal
+                    </button>
+                    <button class="btn btn-success" id="saveJamBtn">
+                        <i class="fas fa-save"></i> Simpan Pengaturan
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+    MODAL PENGATURAN LOKASI GPS - MENGGUNAKAN LEAFLET
+    ============================================================ -->
+    <div class="modal-overlay" id="gpsModal">
+        <div class="modal-content" style="max-width:700px;">
+            <div class="modal-header">
+                <h2><i class="fas fa-map-marker-alt"></i> Pengaturan Lokasi Absen</h2>
+                <button class="modal-close" id="closeGpsModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="register-info" style="margin-bottom:0.5rem;">
+                    <p><i class="fas fa-info-circle"></i> Tentukan titik lokasi absen. Radius absen adalah <strong>10 meter</strong> dari titik ini.</p>
+                    <p style="margin-top:0.3rem;font-size:0.8rem;color:#f39c12;"><i class="fas fa-exclamation-triangle"></i> Masukkan kode akses untuk mengubah lokasi.</p>
+                </div>
+
+                <div class="register-form" style="grid-template-columns:1fr;">
+                    <div class="form-group">
+                        <label><i class="fas fa-key"></i> Kode Akses</label>
+                        <input type="password" id="gpsAccessCode" placeholder="Masukkan kode akses..." />
+                    </div>
+                    <div class="form-group">
+                        <label><i class="fas fa-search"></i> Cari Lokasi</label>
+                        <input type="text" id="gpsSearchInput" placeholder="Cari alamat atau tempat..." />
+                    </div>
+                    <div class="form-group" style="grid-column:1/-1;">
+                        <div id="gpsMap" style="width:100%;height:350px;border-radius:12px;border:1px solid #2a323c;background:#0a0c0f;"></div>
+                    </div>
+                    <div class="form-group" style="grid-column:1/-1;">
+                        <label><i class="fas fa-info-circle"></i> Informasi Lokasi</label>
+                        <div class="register-status" id="gpsStatusInfo">
+                            <span id="gpsLatDisplay">-</span>, <span id="gpsLngDisplay">-</span>
+                        </div>
+                    </div>
+                    <div class="form-group" style="grid-column:1/-1;">
+                        <label><i class="fas fa-flag"></i> Status</label>
+                        <div class="register-status" id="gpsStatusMsg">Klik peta atau cari lokasi untuk menentukan titik</div>
+                    </div>
+                </div>
+
+                <div class="register-actions">
+                    <button class="btn btn-danger" id="cancelGpsBtn">
+                        <i class="fas fa-times"></i> Batal
+                    </button>
+                    <button class="btn btn-success" id="saveGpsBtn">
+                        <i class="fas fa-save"></i> Simpan Lokasi
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+    MODAL EXPORT EXCEL
+    ============================================================ -->
+    <div class="modal-overlay" id="exportModal">
+        <div class="modal-content" style="max-width:500px;">
+            <div class="modal-header">
+                <h2><i class="fas fa-file-excel"></i> Export Data Mingguan</h2>
+                <button class="modal-close" id="closeExportModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="register-info" style="margin-bottom:0.5rem;">
+                    <p><i class="fas fa-info-circle"></i> Pilih minggu dan tahun untuk mengekspor data absensi.</p>
+                </div>
+
+                <div class="register-form" style="grid-template-columns:1fr 1fr;">
+                    <div class="form-group">
+                        <label><i class="fas fa-calendar-week"></i> Minggu Ke-</label>
+                        <input type="number" id="exportWeek" min="1" max="53" placeholder="1-53" />
+                    </div>
+                    <div class="form-group">
+                        <label><i class="fas fa-calendar-alt"></i> Tahun</label>
+                        <input type="number" id="exportYear" min="2020" max="2030" placeholder="2024" />
+                    </div>
+                    <div class="form-group" style="grid-column:1/-1;">
+                        <label><i class="fas fa-info-circle"></i> Status</label>
+                        <div class="register-status" id="exportStatus">Pilih minggu dan tahun, lalu klik Export</div>
+                    </div>
+                </div>
+
+                <div class="register-actions">
+                    <button class="btn btn-danger" id="cancelExportBtn">
+                        <i class="fas fa-times"></i> Batal
+                    </button>
+                    <button class="btn btn-success" id="doExportBtn">
+                        <i class="fas fa-download"></i> Export Excel
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- TOAST -->
     <div class="toast" id="toast">
         <i class="fas fa-check-circle"></i>
@@ -145,6 +352,13 @@
     <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js">
     </script>
     <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js">
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js">
+    </script>
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js">
+    </script>
+    <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js">
     </script>
     <script src="script.js"></script>
 </body>
