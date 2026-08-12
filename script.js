@@ -114,9 +114,19 @@ const DEFAULT_LNG = 112.666827;
 let GPS_LOCATION = { lat: DEFAULT_LAT, lng: DEFAULT_LNG };
 
 // ============================================================
-// FACE MATCHING THRESHOLD
+// FACE MATCHING THRESHOLD - DITURUNKAN UNTUK KETAT
 // ============================================================
-const FACE_MATCH_THRESHOLD = 0.5;
+const FACE_MATCH_THRESHOLD = 0.42;
+
+// ============================================================
+// MINIMAL CONFIDENCE UNTUK DETEKSI WAJAH
+// ============================================================
+const MIN_DETECTION_CONFIDENCE = 0.45;
+
+// ============================================================
+// COOLDOWN UNTUK ABSEN - 30 MENIT (1800000 ms)
+// ============================================================
+const ABSEN_COOLDOWN_MS = 1800000;
 
 // ============================================================
 // FUNGSI GET LOCAL DATE (FIX TIMEZONE)
@@ -200,7 +210,9 @@ const STATE = {
     mapInstance: null,
     mapMarker: null,
     mapCircle: null,
-    processedFaces: new Set()
+    processedFaces: new Set(),
+    lastMatchDistance: {},
+    todayStatusChecked: {} // Untuk tracking status hari ini
 };
 
 // ============================================================
@@ -796,11 +808,9 @@ async function deleteFaceFromFirebase(id) {
 // ============================================================
 async function deleteFaceAndHistoryFromFirebase(id, name) {
     try {
-        // 1. Hapus data wajah
         await db.ref('faces/' + id).remove();
         console.log(`🗑️ Wajah ${id} (${name}) dihapus dari Realtime DB`);
         
-        // 2. Hapus SEMUA riwayat absensi untuk nama ini
         const snapshot = await db.ref('attendance').once('value');
         const data = snapshot.val();
         let deletedCount = 0;
@@ -930,150 +940,65 @@ async function syncAllData() {
 }
 
 // ============================================================
-// AUTO ATTENDANCE FUNCTIONS
+// AUTO ATTENDANCE FUNCTIONS - DENGAN PENCEGAHAN DUPLIKAT
 // ============================================================
 async function autoAbsen(name, id) {
     const now = Date.now();
+    const today = getLocalDate();
     
+    // 🔥 CEK COOLDOWN - 30 MENIT
     const cooldownKey = name;
-    if (STATE.autoAbsenCooldown[cooldownKey] && (now - STATE.autoAbsenCooldown[cooldownKey] < 10000)) {
-        console.log(`⏳ ${name} - Cooldown aktif, lewati`);
+    if (STATE.autoAbsenCooldown[cooldownKey] && (now - STATE.autoAbsenCooldown[cooldownKey] < ABSEN_COOLDOWN_MS)) {
+        const remaining = Math.ceil((ABSEN_COOLDOWN_MS - (now - STATE.autoAbsenCooldown[cooldownKey])) / 60000);
+        console.log(`⏳ ${name} - Cooldown aktif, tunggu ${remaining} menit lagi`);
         return;
     }
 
-    const today = getLocalDate();
-    const timeStr = new Date().toLocaleTimeString('id-ID', { hour12: false });
-    const { bisaMasuk, bisaPulang, jam, menit } = cekJamAbsen();
-    
-    const existingHistory = STATE.attendanceHistory.find(h =>
+    // 🔥 CEK APAKAH SUDAH ADA CATATAN HARI INI
+    const existingToday = STATE.attendanceHistory.filter(h =>
         h.name === name && h.date === today
     );
+    
+    // Jika sudah ada catatan hadir atau pulang hari ini, lewati
+    if (existingToday.length > 0) {
+        const statuses = existingToday.map(h => h.status);
+        if (statuses.includes('hadir') || statuses.includes('pulang') || statuses.includes('lembur')) {
+            console.log(`ℹ️ ${name} - Sudah ${statuses.join(', ')} hari ini, lewati`);
+            return;
+        }
+    }
+
+    const timeStr = new Date().toLocaleTimeString('id-ID', { hour12: false });
+    const { bisaMasuk, bisaPulang, jam, menit } = cekJamAbsen();
 
     try {
         const lokasi = await cekLokasi();
         if (!lokasi.valid) {
             showToast(`📍 ${name} - ${lokasi.error}`, 'warning');
-            STATE.autoAbsenCooldown[cooldownKey] = Date.now();
+            STATE.autoAbsenCooldown[cooldownKey] = now;
             return;
         }
 
-        if (existingHistory) {
-            const isCheckIn = existingHistory.type === 'check_in' || existingHistory.type === 'auto_check_in';
-            
-            if (isCheckIn && !bisaPulang) {
-                console.log(`ℹ️ ${name} - Sudah absen masuk, tunggu jam pulang`);
-                STATE.autoAbsenCooldown[cooldownKey] = Date.now();
-                return;
-            }
-            
-            if (isCheckIn && bisaPulang) {
-                const existingPulang = STATE.attendanceHistory.find(h =>
-                    h.name === name && h.date === today && (h.status === 'pulang' || h.status === 'lembur')
-                );
-                
-                if (existingPulang) {
-                    console.log(`ℹ️ ${name} - Sudah absen pulang/lembur hari ini`);
-                    STATE.autoAbsenCooldown[cooldownKey] = Date.now();
-                    return;
+        // 🔥 CEK STATUS HARI INI DARI FIREBASE
+        const todaySnapshot = await db.ref('attendance/' + today + '/individuals').once('value');
+        const todayData = todaySnapshot.val();
+        let sudahAbsenHariIni = false;
+        
+        if (todayData) {
+            Object.values(todayData).forEach(item => {
+                if (item.name === name && (item.status === 'hadir' || item.status === 'pulang' || item.status === 'lembur')) {
+                    sudahAbsenHariIni = true;
                 }
-                
-                // 🔥 LOAD JAM PULANG DARI FIREBASE SECARA REALTIME
-                let jamPulangNormal = JAM_PULANG_MULAI;
-                try {
-                    const snapshot = await db.ref('settings/jam_kerja/jam_pulang_mulai').once('value');
-                    const dbJamPulang = snapshot.val();
-                    if (dbJamPulang !== null && dbJamPulang !== undefined) {
-                        jamPulangNormal = dbJamPulang;
-                        JAM_PULANG_MULAI = dbJamPulang;
-                        updateJamDisplay();
-                    }
-                } catch (error) {
-                    console.warn('⚠️ Gagal load jam pulang dari DB, pakai default:', error);
-                }
-                
-                // 🔥 CEK LEMBUR DENGAN JAM PULANG DARI DATABASE
-                const lemburInfo = cekLembur(jam, menit, jamPulangNormal);
-                const statusPulang = lemburInfo.isLembur ? 'lembur' : 'pulang';
-                const statusLabel = lemburInfo.isLembur ? `Lembur (${lemburInfo.label})` : 'Pulang';
-                
-                console.log(`📋 Jam pulang normal: ${jamPulangNormal}:00, Pulang aktual: ${jam}:${menit}, Lembur: ${lemburInfo.isLembur}`);
-                
-                const record = {
-                    name: name,
-                    status: statusPulang,
-                    type: lemburInfo.isLembur ? 'check_out_lembur' : 'check_out',
-                    timestamp: firebase.database.ServerValue.TIMESTAMP,
-                    date: today,
-                    time: timeStr,
-                    jamAbsen: `${String(jam).padStart(2, '0')}:${String(menit).padStart(2, '0')}`,
-                    jamPulangNormal: jamPulangNormal,
-                    clientTime: new Date().toISOString(),
-                    location: {
-                        lat: lokasi.lat,
-                        lng: lokasi.lng,
-                        distance: lokasi.distance
-                    },
-                    lembur: lemburInfo.isLembur ? {
-                        selisihJam: lemburInfo.selisihJam,
-                        jamLembur: lemburInfo.jamLembur,
-                        menitLembur: lemburInfo.menitLembur,
-                        label: lemburInfo.label,
-                        jamPulangNormal: jamPulangNormal
-                    } : null
-                };
-
-                await db.ref('attendance/' + today + '/individuals/' + existingHistory.id).remove();
-
-                const ref = db.ref('attendance/' + today + '/individuals').push();
-                await ref.set(record);
-
-                const index = STATE.attendanceHistory.findIndex(h => h.id === existingHistory.id);
-                if (index !== -1) {
-                    STATE.attendanceHistory[index] = {
-                        id: ref.key,
-                        name: name,
-                        status: statusPulang,
-                        time: timeStr,
-                        date: today,
-                        timestamp: Date.now(),
-                        type: lemburInfo.isLembur ? 'check_out_lembur' : 'check_out',
-                        jamAbsen: record.jamAbsen,
-                        jamPulangNormal: jamPulangNormal,
-                        location: record.location,
-                        lembur: lemburInfo.isLembur ? {
-                            selisihJam: lemburInfo.selisihJam,
-                            jamLembur: lemburInfo.jamLembur,
-                            menitLembur: lemburInfo.menitLembur,
-                            label: lemburInfo.label,
-                            jamPulangNormal: jamPulangNormal
-                        } : null
-                    };
-                }
-
-                STATE.updateCount++;
-                STATE.lastUpdateTime = Date.now();
-                STATE.autoAbsenCooldown[cooldownKey] = Date.now();
-
-                renderHistory();
-                updateStatusBar();
-
-                const lemburMsg = lemburInfo.isLembur ? ` 🕐 Lembur ${lemburInfo.label} (normal ${jamPulangNormal}:00)` : '';
-                const toastType = lemburInfo.isLembur ? 'lembur' : 'update';
-                showToast(`✅ ${name} - ${statusLabel} ${timeStr} (${lokasi.distance.toFixed(1)}m)${lemburMsg}`, toastType);
-                console.log(`✅ ${statusLabel}: ${name} pada ${timeStr}${lemburMsg}`);
-                return;
-            }
-            
-            if (existingHistory.status === 'pulang' || existingHistory.status === 'lembur') {
-                console.log(`ℹ️ ${name} - Sudah pulang/lembur hari ini`);
-                STATE.autoAbsenCooldown[cooldownKey] = Date.now();
-                return;
-            }
-            
-            STATE.autoAbsenCooldown[cooldownKey] = Date.now();
+            });
+        }
+        
+        if (sudahAbsenHariIni) {
+            console.log(`ℹ️ ${name} - Sudah ada catatan hari ini di Firebase`);
+            STATE.autoAbsenCooldown[cooldownKey] = now;
             return;
         }
 
+        // 🔥 PROSES ABSEN MASUK
         if (bisaMasuk) {
             const record = {
                 name: name,
@@ -1107,7 +1032,8 @@ async function autoAbsen(name, id) {
             });
 
             STATE.attendance[id] = true;
-            STATE.autoAbsenCooldown[cooldownKey] = Date.now();
+            STATE.autoAbsenCooldown[cooldownKey] = now;
+            STATE.todayStatusChecked[name] = today;
 
             renderList();
             renderHistory();
@@ -1120,12 +1046,21 @@ async function autoAbsen(name, id) {
         } 
         else if (jam >= JAM_MASUK_BATAS && jam < JAM_PULANG_MULAI) {
             showToast(`⏰ ${name} - Melewati batas absen masuk (${JAM_MASUK_BATAS}:00)`, 'warning');
-            console.log(`⏰ ${name} - Melewati batas absen masuk`);
-            STATE.autoAbsenCooldown[cooldownKey] = Date.now();
+            STATE.autoAbsenCooldown[cooldownKey] = now;
             return;
         }
         else if (bisaPulang) {
-            // 🔥 LOAD JAM PULANG DARI FIREBASE SECARA REALTIME
+            // 🔥 CEK APAKAH SUDAH PULANG
+            const sudahPulang = STATE.attendanceHistory.some(h =>
+                h.name === name && h.date === today && (h.status === 'pulang' || h.status === 'lembur')
+            );
+            
+            if (sudahPulang) {
+                console.log(`ℹ️ ${name} - Sudah pulang/lembur hari ini`);
+                STATE.autoAbsenCooldown[cooldownKey] = now;
+                return;
+            }
+
             let jamPulangNormal = JAM_PULANG_MULAI;
             try {
                 const snapshot = await db.ref('settings/jam_kerja/jam_pulang_mulai').once('value');
@@ -1139,7 +1074,6 @@ async function autoAbsen(name, id) {
                 console.warn('⚠️ Gagal load jam pulang dari DB, pakai default:', error);
             }
             
-            // 🔥 CEK LEMBUR
             const lemburInfo = cekLembur(jam, menit, jamPulangNormal);
             const statusPulang = lemburInfo.isLembur ? 'lembur' : 'pulang';
             const statusLabel = lemburInfo.isLembur ? `Lembur (${lemburInfo.label})` : 'Pulang';
@@ -1194,7 +1128,8 @@ async function autoAbsen(name, id) {
             });
 
             STATE.attendance[id] = true;
-            STATE.autoAbsenCooldown[cooldownKey] = Date.now();
+            STATE.autoAbsenCooldown[cooldownKey] = now;
+            STATE.todayStatusChecked[name] = today;
 
             renderList();
             renderHistory();
@@ -1210,11 +1145,12 @@ async function autoAbsen(name, id) {
 
     } catch (error) {
         console.error('❌ Gagal auto absen:', error);
+        STATE.autoAbsenCooldown[cooldownKey] = now;
     }
 }
 
 // ============================================================
-// RENDER FUNCTIONS - MENAMPILKAN SEMUA DATA
+// RENDER FUNCTIONS
 // ============================================================
 
 function renderList() {
@@ -1235,7 +1171,6 @@ function renderList() {
         const hasUpdate = STATE.attendanceHistory.some(h => h.name === item.name && h.type === 'update_time');
         const hasIzin = STATE.attendanceHistory.some(h => h.name === item.name && h.type === 'izin_pulang');
         
-        // 🔥 CEK APAKAH ADA RIWAYAT LEMBUR HARI INI
         const today = getLocalDate();
         const hasLembur = STATE.attendanceHistory.some(h => 
             h.name === item.name && 
@@ -1250,6 +1185,9 @@ function renderList() {
         
         const lemburBadge = hasLembur ? ` <span class="badge-lembur">⚡ lembur</span>` : '';
         
+        const lastDist = STATE.lastMatchDistance[item.name] || '';
+        const distInfo = lastDist ? ` (${(lastDist * 100).toFixed(1)}%)` : '';
+        
         html += `
                     <div class="face-item" data-id="${item.id}">
                         <div class="name">
@@ -1258,6 +1196,7 @@ function renderList() {
                             ${hadir ? `<span style="font-size:0.6rem;color:#b06af0;margin-left:0.3rem;"><i class="fas fa-magic"></i> ${extraBadge}</span>` : ''}
                             ${hasIzin ? `<span style="font-size:0.6rem;color:#f39c12;margin-left:0.2rem;">📝</span>` : ''}
                             ${lemburBadge}
+                            <span style="font-size:0.55rem;color:#6a7e94;margin-left:0.3rem;">${distInfo}</span>
                         </div>
                         <span class="status-badge ${statusClass}">${statusLabel} ${hasUpdate ? '🔄' : ''}</span>
                         <button class="btn-hapus" data-id="${item.id}" title="Hapus Wajah + Semua Riwayat">
@@ -1276,9 +1215,6 @@ function renderList() {
     });
 }
 
-// ============================================================
-// RENDER HISTORY - MENAMPILKAN SEMUA RIWAYAT DENGAN TANGGAL
-// ============================================================
 function renderHistory() {
     const history = STATE.attendanceHistory;
 
@@ -1303,7 +1239,6 @@ function renderHistory() {
         let statusLabel = '🚪 Pulang';
         let badge = ' <span class="h-update">pulang</span>';
         
-        // 🔥 CEK STATUS LEMBUR
         if (item.status === 'lembur' || item.type === 'check_out_lembur') {
             statusClass = 'lembur';
             const lemburLabel = item.lembur?.label || 'Lembur';
@@ -1331,11 +1266,9 @@ function renderHistory() {
         const jarak = item.location && item.location.distance ? `📍${item.location.distance.toFixed(0)}m` : '';
         const note = item.note ? ` 📝${item.note}` : '';
         
-        // 🔥 TAMBAHKAN INFO JAM PULANG NORMAL
         const normalPulangInfo = item.jamPulangNormal !== undefined ? ` (normal ${item.jamPulangNormal}:00)` : '';
         const lemburInfo = item.lembur ? ` 🕐${item.lembur.label}${normalPulangInfo}` : '';
         
-        // 🔥 FORMAT TANGGAL KE DD/MM/YYYY
         const tanggalFormatted = formatLocalDate(item.date);
         
         html += `
@@ -1400,9 +1333,6 @@ async function tambahWajah(name, descriptor) {
     return id;
 }
 
-// ============================================================
-// HAPUS WAJAH + SEMUA RIWAYAT ABSENSI
-// ============================================================
 async function hapusWajahWithToken(id) {
     const face = STATE.registered.find(f => f.id === id);
     if (!face) {
@@ -1437,7 +1367,9 @@ async function hapusWajahWithToken(id) {
     delete STATE.attendance[id];
     delete STATE.autoAbsenCooldown[id];
     delete STATE.autoAbsenCooldown[face.name];
+    delete STATE.todayStatusChecked[face.name];
     STATE.attendanceHistory = STATE.attendanceHistory.filter(item => item.name !== face.name);
+    delete STATE.lastMatchDistance[face.name];
 
     renderList();
     renderHistory();
@@ -1450,9 +1382,6 @@ async function hapusWajahWithToken(id) {
     registerStatus.textContent = 'Siap mendaftar';
 }
 
-// ============================================================
-// HAPUS SATU RIWAYAT ABSENSI
-// ============================================================
 async function hapusHistoryItem(id, name) {
     if (!id) {
         showToast('❌ Data tidak valid', 'error');
@@ -1488,6 +1417,7 @@ async function hapusHistoryItem(id, name) {
             if (reg) {
                 STATE.attendance[reg.id] = false;
             }
+            delete STATE.todayStatusChecked[name];
         }
         
         renderHistory();
@@ -1499,77 +1429,6 @@ async function hapusHistoryItem(id, name) {
     } catch (error) {
         console.error('❌ Gagal hapus riwayat:', error);
         showToast('❌ Gagal hapus riwayat: ' + error.message, 'error');
-    }
-}
-
-// ============================================================
-// HAPUS SEMUA RIWAYAT UNTUK SATU NAMA (OPSIONAL)
-// ============================================================
-async function hapusSemuaRiwayatNama(name) {
-    if (!name) {
-        showToast('❌ Nama tidak valid', 'error');
-        return;
-    }
-
-    const token = prompt(`⚠️ Konfirmasi Hapus SEMUA Riwayat "${name}"\n\nMasukkan Kode Akses untuk menghapus SEMUA riwayat absensi "${name}":`);
-    
-    if (token === null) {
-        showToast('❌ Penghapusan dibatalkan', 'info');
-        return;
-    }
-    
-    if (token !== ACCESS_CODE) {
-        showToast('❌ Kode akses salah! Penghapusan dibatalkan.', 'error');
-        return;
-    }
-
-    if (!confirm(`⚠️ Yakin ingin menghapus SEMUA riwayat absensi "${name}"?\n\nTindakan ini TIDAK BISA dibatalkan!`)) {
-        showToast('❌ Penghapusan dibatalkan', 'info');
-        return;
-    }
-
-    try {
-        const snapshot = await db.ref('attendance').once('value');
-        const data = snapshot.val();
-        let deletedCount = 0;
-        
-        if (data) {
-            const updates = {};
-            Object.keys(data).forEach(dateKey => {
-                const dayData = data[dateKey];
-                if (dayData && dayData.individuals) {
-                    Object.keys(dayData.individuals).forEach(recordId => {
-                        const record = dayData.individuals[recordId];
-                        if (record.name === name) {
-                            updates[`attendance/${dateKey}/individuals/${recordId}`] = null;
-                            deletedCount++;
-                        }
-                    });
-                }
-            });
-            
-            if (Object.keys(updates).length > 0) {
-                await db.ref().update(updates);
-                console.log(`🗑️ ${deletedCount} riwayat untuk "${name}" dihapus`);
-            }
-        }
-        
-        STATE.attendanceHistory = STATE.attendanceHistory.filter(item => item.name !== name);
-        
-        const reg = STATE.registered.find(r => r.name === name);
-        if (reg) {
-            STATE.attendance[reg.id] = false;
-        }
-        
-        renderHistory();
-        updateAbsenCount();
-        updateStatusBar();
-        
-        showToast(`🗑️ ${deletedCount} riwayat "${name}" berhasil dihapus`, 'success');
-        
-    } catch (error) {
-        console.error('❌ Gagal hapus semua riwayat:', error);
-        showToast('❌ Gagal hapus semua riwayat: ' + error.message, 'error');
     }
 }
 
@@ -1603,9 +1462,11 @@ async function resetSemua() {
         STATE.attendanceHistory = [];
         STATE.detectedFaces = [];
         STATE.autoAbsenCooldown = {};
+        STATE.todayStatusChecked = {};
         STATE.updateCount = 0;
         STATE.lastUpdateTime = null;
         STATE.lastSync = Date.now();
+        STATE.lastMatchDistance = {};
         updateLastSync();
 
         renderList();
@@ -1689,9 +1550,6 @@ async function saveJamSettings() {
     console.log('✅ Pengaturan jam kerja berhasil diubah dan disimpan ke Firebase');
 }
 
-// ============================================================
-// LISTENER REALTIME - PERUBAHAN JAM KERJA
-// ============================================================
 function listenJamKerjaChanges() {
     const jamKerjaRef = db.ref('settings/jam_kerja');
     
@@ -1961,7 +1819,7 @@ if (gpsSearchInput) {
 }
 
 // ============================================================
-// IZIN PULANG - ABSEN PULANG LEBIH AWAL
+// IZIN PULANG
 // ============================================================
 function openIzinPulangModal() {
     if (STATE.isIzinPulangModalOpen) return;
@@ -2027,9 +1885,17 @@ async function submitIzinPulang() {
     const jam = now.getHours();
     const menit = now.getMinutes();
 
+    // 🔥 CEK APAKAH SUDAH ADA CATATAN HARI INI
     const existingHistory = STATE.attendanceHistory.find(h =>
         h.name === face.name && h.date === today
     );
+
+    if (existingHistory && (existingHistory.status === 'pulang' || existingHistory.status === 'lembur')) {
+        izinStatus.textContent = `⚠️ ${face.name} sudah pulang/lembur hari ini`;
+        izinStatus.style.color = '#f39c12';
+        showToast(`⚠️ ${face.name} sudah pulang/lembur hari ini`, 'warning');
+        return;
+    }
 
     try {
         const lokasi = await cekLokasi();
@@ -2108,6 +1974,7 @@ async function submitIzinPulang() {
         STATE.updateCount++;
         STATE.lastUpdateTime = Date.now();
         STATE.autoAbsenCooldown[face.name] = Date.now();
+        STATE.todayStatusChecked[face.name] = today;
 
         renderHistory();
         updateStatusBar();
@@ -2508,6 +2375,30 @@ async function detectLoop(timestamp) {
 
         STATE.detectedFaces = [];
 
+        // 🔥 HANYA PROSES JIKA HANYA 1 WAJAH TERDETEKSI
+        if (fullDetections.length > 1) {
+            for (const detection of fullDetections) {
+                const box = detection.detection.box;
+                const x = box.x, y = box.y, width = box.width, height = box.height;
+                ctx.strokeStyle = '#e74c3c';
+                ctx.lineWidth = 2;
+                ctx.shadowColor = '#e74c3c55';
+                ctx.shadowBlur = 10;
+                ctx.strokeRect(x, y, width, height);
+                ctx.shadowBlur = 0;
+                ctx.font = 'bold 14px Segoe UI, sans-serif';
+                ctx.fillStyle = '#e74c3c';
+                ctx.fillText(`⚠️ ${fullDetections.length} wajah`, x + 6, y - 6);
+            }
+            detectionInfo.innerHTML = `<i class="fas fa-exclamation-triangle"></i> ${fullDetections.length} wajah - absensi ditunda`;
+            detectionInfo.className = 'info-badge error';
+            requestAnimationFrame(detectLoop);
+            return;
+        }
+
+        detectionInfo.innerHTML = `<i class="fas fa-eye"></i> Wajah: 1 ✅`;
+        detectionInfo.className = 'info-badge success';
+
         for (const detection of fullDetections) {
             const box = detection.detection.box;
             const descriptor = detection.descriptor;
@@ -2519,12 +2410,14 @@ async function detectLoop(timestamp) {
             let matchId = null;
             let matchName = null;
             let minDist = 0.6;
+            let allDistances = [];
 
             for (const reg of STATE.registered) {
                 if (!reg.descriptor || !reg.descriptor.length) continue;
                 try {
                     const regDesc = new Float32Array(reg.descriptor);
                     const dist = faceapi.euclideanDistance(descriptor, regDesc);
+                    allDistances.push({ name: reg.name, distance: dist });
                     
                     if (dist < minDist && dist < FACE_MATCH_THRESHOLD) {
                         minDist = dist;
@@ -2534,6 +2427,10 @@ async function detectLoop(timestamp) {
                 } catch (e) {
                     console.warn('Error comparing descriptor:', e);
                 }
+            }
+
+            if (matchName) {
+                STATE.lastMatchDistance[matchName] = minDist;
             }
 
             const isMatch = matchId !== null;
@@ -2585,7 +2482,10 @@ async function detectLoop(timestamp) {
                 const hasUpdate = STATE.attendanceHistory.some(h => h.name === matchName && h.type === 'update_time');
                 let label = hadir ? `✅ ${matchName} ✓` : `🔄 ${matchName}...`;
                 if (hadir && hasUpdate) label = `🔄 ${matchName} ↻`;
-                ctx.fillText(label, x + 6, y - 6);
+                
+                const conf = Math.round((1 - minDist) * 100);
+                const confText = conf > 70 ? ` (${conf}%)` : '';
+                ctx.fillText(label + confText, x + 6, y - 6);
 
                 const existing = STATE.detectedFaces.find(f => f.id === matchId);
                 if (!existing) {
@@ -3145,7 +3045,6 @@ async function initApp() {
         console.log('⏳ Memulai loadSettingsFromFirebase...');
         await loadSettingsFromFirebase();
 
-        // 🔥 START LISTENER REALTIME UNTUK JAM KERJA
         listenJamKerjaChanges();
 
         await loadFacesFromFirebase();
@@ -3169,6 +3068,8 @@ async function initApp() {
         console.log('📋 Jam Masuk Batas:', JAM_MASUK_BATAS + ':00');
         console.log('📋 Jam Pulang Mulai:', JAM_PULANG_MULAI + ':00');
         console.log('📍 Lokasi Absen:', GPS_LOCATION ? `${GPS_LOCATION.lat}, ${GPS_LOCATION.lng}` : 'Belum diatur');
+        console.log('🎯 Threshold pencocokan:', FACE_MATCH_THRESHOLD);
+        console.log('⏱️ Cooldown absen:', ABSEN_COOLDOWN_MS / 60000, 'menit');
 
         if (!STATE.modelLoaded) {
             loadAllModels();
@@ -3192,7 +3093,6 @@ stopBtn.addEventListener('click', stopDetection);
 resetBtn.addEventListener('click', resetSemua);
 syncBtn.addEventListener('click', syncFacesToFirebase);
 
-// SYNC ALL BUTTON
 if (syncAllBtn) {
     syncAllBtn.addEventListener('click', async function() {
         const btn = this;
@@ -3216,12 +3116,10 @@ if (syncAllBtn) {
     });
 }
 
-// IZIN PULANG BUTTON
 if (izinPulangBtn) {
     izinPulangBtn.addEventListener('click', openIzinPulangModal);
 }
 
-// IZIN PULANG MODAL EVENTS
 if (closeIzinPulangModal) {
     closeIzinPulangModal.addEventListener('click', closeIzinPulangModalFn);
 }
@@ -3242,7 +3140,6 @@ if (izinPulangModal) {
     });
 }
 
-// IZIN PULANG - ENTER KEY SUPPORT
 if (izinNamaInput) {
     izinNamaInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
